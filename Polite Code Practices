@@ -1,0 +1,2 @@
+Use branches. Each person works on their own (for example data-processing or app-ui) and merges into main through a pull request, so nobody overwrites anyone else.
+Pull before you start working each time, and push at the end of each session.
