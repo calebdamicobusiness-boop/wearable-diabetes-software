@@ -1,0 +1,7 @@
+# Core pipeline uses only the Python standard library.
+# Add these as the team needs them:
+# numpy
+# pandas
+# fastapi
+# uvicorn
+# python-dotenv

@@ -3,3 +3,5 @@
 GL =                            'something here from glucose monitoring'
 HR =                            'something here from heart rate monitoring'
 Accel =                         'accelerometer data'
+
+"""Bluetooth upload for App integration"""
