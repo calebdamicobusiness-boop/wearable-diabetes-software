@@ -206,9 +206,9 @@ def fuse_window(buf: SampleBuffer, sources: dict[str, str], t_end: float,
     # A bin is usable only if EVERY source has a good value (fused features need all inputs)
     ok_idx = [i for i in range(n_bins) if all(binned[r][i].value is not None for r in binned)]
     missing = 1 - len(ok_idx) / n_bins
-    conf = min(                                   # inherit the worst input quality
-        (statistics.fmean(binned[r][i].quality for i in ok_idx) for r in binned),
-        default=0.0,
+    conf = (  # inherit the worst input quality
+        min(statistics.fmean(binned[r][i].quality for i in ok_idx) for r in binned)
+        if ok_idx else 0.0
     )
 
     if missing > SUPPRESS_MISSING_FRAC or not ok_idx:
