@@ -8,6 +8,10 @@ Maps to the VSD specs:
   S9  buffer >=24 h offline, zero lost samples (UNIQUE(source,t) dedupes on re-sync)
   S10 subgroup error report, flag subgroup error > overall * 1.2
 
+EDA (electrodermal activity, in microsiemens) is split into:
+  tonic  = slow baseline skin-conductance level (SCL)
+  phasic = fast skin-conductance responses (SCRs) riding on the baseline
+
 Stdlib only (Python 3.10+). To add a sensor: subclass SensorSource, implement
 fetch(), register it with the pipeline. Nothing else changes.
 """
@@ -31,6 +35,12 @@ MAX_MISSING_FRAC = 0.10     # S5: above this -> low confidence
 SUPPRESS_MISSING_FRAC = 0.50
 MIN_SAMPLE_QUALITY = 0.5    # samples below this count as missing
 MIN_WINDOW_QUALITY = 0.6
+
+# EDA decomposition (starting values; confirm against your sensor's sampling rate)
+EDA_TONIC_WINDOW_S = 30.0       # baseline smoothing window
+EDA_SCR_MIN_AMP_US = 0.05       # smallest phasic peak counted as a response (microsiemens)
+EDA_SCR_PEAK_HALF_WIN_S = 1.0   # a peak must be the max within +/- this many seconds
+EDA_SCR_MIN_SEP_S = 1.0         # minimum spacing between responses
 
 
 # --------------------------------------------------------------------------- #
@@ -122,6 +132,45 @@ class HeartRateSource(SensorSource):
         raise NotImplementedError
 
 
+class EDASource(SensorSource):
+    """Electrodermal activity (skin conductance) in microsiemens, typically 4 Hz."""
+
+    def __init__(self, device, fs_hz: float = 4.0, **kw):
+        super().__init__("eda", expected_period_s=1.0 / fs_hz, **kw)
+        self.device = device            # BLE handle / wearable SDK
+
+    def fetch(self):
+        # TODO: return [Sample(t, microsiemens, quality, self.name), ...]
+        raise NotImplementedError
+
+
+class SimulatedEDASource(SensorSource):
+    """Fake EDA: slow baseline + random skin-conductance responses (SCRs)."""
+
+    def __init__(self, name="eda", fs_hz=4.0, start_t=None, scr_per_min=4.0, seed=0):
+        super().__init__(name, expected_period_s=1.0 / fs_hz)
+        self._rng = random.Random(seed)
+        self._dt = 1.0 / fs_hz
+        self._next_t = start_t if start_t is not None else time.time()
+        self._rate = scr_per_min
+        self._events: list[tuple[float, float]] = []    # (onset, amplitude)
+
+    def fetch(self):
+        now, out = time.time(), []
+        while self._next_t <= now:
+            t = self._next_t
+            self._next_t += self._dt
+            if self._rng.random() < self._rate / 60.0 * self._dt:
+                self._events.append((t, self._rng.uniform(0.2, 0.8)))
+            self._events = [(o, a) for o, a in self._events if t - o < 30]
+            tonic = 4.0 + 0.8 * math.sin(t / 1800)
+            phasic = sum(a * 2.1 * (math.exp(-(t - o) / 3.0) - math.exp(-(t - o) / 0.75))
+                         for o, a in self._events)
+            q = 0.3 if self._rng.random() < 0.002 else 1.0
+            out.append(Sample(t, tonic + phasic + self._rng.gauss(0, 0.01), q, self.name))
+        return out
+
+
 # --------------------------------------------------------------------------- #
 # Local buffer (S9, S1)
 # --------------------------------------------------------------------------- #
@@ -154,6 +203,85 @@ class SampleBuffer:
     def purge_old(self, now: float) -> None:
         with self.db:
             self.db.execute("DELETE FROM samples WHERE t < ?", (now - self.retention_s,))
+
+
+# --------------------------------------------------------------------------- #
+# EDA: tonic / phasic separation
+# --------------------------------------------------------------------------- #
+@dataclass
+class EDAComponents:
+    t: list = field(default_factory=list)
+    tonic: list = field(default_factory=list)        # slow baseline level (SCL), microsiemens
+    phasic: list = field(default_factory=list)       # fast responses (SCR), microsiemens
+    quality: list = field(default_factory=list)
+    scr_events: list = field(default_factory=list)   # [(time, amplitude_uS), ...]
+
+    def tonic_samples(self, source: str) -> list[Sample]:
+        return [Sample(t, v, q, source) for t, v, q in zip(self.t, self.tonic, self.quality)]
+
+
+def _moving_average(vals: list[float], n: int) -> list[float]:
+    """Centered moving average (O(n) via cumulative sums); window shrinks at the edges."""
+    half = max(1, n) // 2
+    cs = [0.0]
+    for v in vals:
+        cs.append(cs[-1] + v)
+    L = len(vals)
+    out = []
+    for i in range(L):
+        lo, hi = max(0, i - half), min(L, i + half + 1)
+        out.append((cs[hi] - cs[lo]) / (hi - lo))
+    return out
+
+
+def decompose_eda(samples: list[Sample], tonic_window_s: float = EDA_TONIC_WINDOW_S,
+                  scr_min_amp: float = EDA_SCR_MIN_AMP_US, max_gap_s: float = 5.0) -> EDAComponents:
+    """Split raw EDA into tonic (slow baseline) and phasic (fast responses) and detect SCRs.
+
+    Simple, dependency-free method: a smoothed baseline (computed twice, the second time with
+    response peaks clipped off so they don't drag it upward) is the tonic part; the remainder
+    is phasic. For publication-grade results swap this function for cvxEDA / NeuroKit2
+    while keeping the same EDAComponents return type.
+    """
+    good = [s for s in samples if s.quality >= MIN_SAMPLE_QUALITY]
+    res = EDAComponents()
+    if len(good) < 3:
+        return res
+
+    segments, cur = [], [good[0]]                 # split wherever data has a real gap
+    for s in good[1:]:
+        if s.t - cur[-1].t > max_gap_s:
+            segments.append(cur)
+            cur = [s]
+        else:
+            cur.append(s)
+    segments.append(cur)
+
+    last_scr_t = -math.inf
+    for seg in segments:
+        if len(seg) < 3:
+            continue
+        fs = 1.0 / statistics.median(b.t - a.t for a, b in zip(seg, seg[1:]))
+        n = int(tonic_window_s * fs)
+        vals = [s.value for s in seg]
+        base = _moving_average(vals, n)
+        tonic = _moving_average([min(v, b) for v, b in zip(vals, base)], n)
+        phasic = [v - b for v, b in zip(vals, tonic)]
+
+        half = max(1, int(round(EDA_SCR_PEAK_HALF_WIN_S * fs)))
+        for i, p in enumerate(phasic):
+            if p < scr_min_amp:
+                continue
+            lo, hi = max(0, i - half), min(len(phasic), i + half + 1)
+            if p >= max(phasic[lo:hi]) and seg[i].t - last_scr_t >= EDA_SCR_MIN_SEP_S:
+                res.scr_events.append((seg[i].t, p))
+                last_scr_t = seg[i].t
+
+        res.t += [s.t for s in seg]
+        res.tonic += tonic
+        res.phasic += phasic
+        res.quality += [s.quality for s in seg]
+    return res
 
 
 # --------------------------------------------------------------------------- #
@@ -200,13 +328,19 @@ def fuse_window(buf: SampleBuffer, sources: dict[str, str], t_end: float,
     """sources maps role -> source name, e.g. {"glucose": "cgm", "hr": "hr"}."""
     t_end = math.floor(t_end / bin_s) * bin_s
     t0 = t_end - n_bins * bin_s
-    binned = {role: bin_signal(buf.query(name, t0, t_end), t0, n_bins, bin_s)
-              for role, name in sources.items()}
+    binned: dict[str, list[BinValue]] = {}
+    eda_comp: Optional[EDAComponents] = None
+    for role, name in sources.items():
+        raw = buf.query(name, t0, t_end)
+        if role == "eda":                         # fuse the slow tonic level, keep SCRs separately
+            eda_comp = decompose_eda(raw)
+            raw = eda_comp.tonic_samples(name)
+        binned[role] = bin_signal(raw, t0, n_bins, bin_s)
 
     # A bin is usable only if EVERY source has a good value (fused features need all inputs)
     ok_idx = [i for i in range(n_bins) if all(binned[r][i].value is not None for r in binned)]
     missing = 1 - len(ok_idx) / n_bins
-    conf = (  # inherit the worst input quality
+    conf = (                                      # inherit the worst input quality
         min(statistics.fmean(binned[r][i].quality for i in ok_idx) for r in binned)
         if ok_idx else 0.0
     )
@@ -223,6 +357,11 @@ def fuse_window(buf: SampleBuffer, sources: dict[str, str], t_end: float,
             feats["glucose_slope_per_min"] = _slope_per_min(g, bin_s)
     if "hr" in binned:
         feats["hr_mean"] = statistics.fmean(binned["hr"][i].value for i in ok_idx)
+    if eda_comp is not None and "eda" in binned:
+        feats["eda_tonic_mean"] = statistics.fmean(binned["eda"][i].value for i in ok_idx)
+        in_win = [a for t, a in eda_comp.scr_events if t0 <= t < t_end]
+        feats["scr_per_min"] = len(in_win) / (n_bins * bin_s / 60)
+        feats["scr_mean_amp"] = statistics.fmean(in_win) if in_win else 0.0
     if {"glucose", "hr"} <= binned.keys() and len(ok_idx) >= 4:
         gv = [binned["glucose"][i].value for i in ok_idx]
         hv = [binned["hr"][i].value for i in ok_idx]
@@ -244,6 +383,8 @@ def describe(w: FusedWindow) -> str:
         parts.append("glucose rising" if s > 0.5 else "glucose falling" if s < -0.5 else "glucose steady")
     if "hr_mean" in f:
         parts.append(f"average heart rate {f['hr_mean']:.0f} bpm")
+    if "scr_per_min" in f:
+        parts.append(f"{f['scr_per_min']:.1f} skin-conductance responses per minute")
     return ("; ".join(parts) or "no features") + tag + ". " + w.note
 
 
@@ -304,8 +445,9 @@ if __name__ == "__main__":
     pipe = IntegrationPipeline()
     pipe.register(SimulatedSource("cgm", 300, 120, 30, 3, start, seed=1))
     pipe.register(SimulatedSource("hr", 30, 75, 12, 4, start, seed=2))
+    pipe.register(SimulatedEDASource("eda", start_t=start, seed=3))
     print("added:", pipe.poll())
-    w = pipe.latest({"glucose": "cgm", "hr": "hr"})
+    w = pipe.latest({"glucose": "cgm", "hr": "hr", "eda": "eda"})
     print(f"status={w.status} missing={w.missing_frac:.0%} confidence={w.confidence:.2f}")
     print({k: (round(v, 2) if v is not None else None) for k, v in w.features.items()})
     print(describe(w))
