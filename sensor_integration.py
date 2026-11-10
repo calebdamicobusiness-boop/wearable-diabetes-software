@@ -132,7 +132,7 @@ class HeartRateSource(SensorSource):
         raise NotImplementedError
 
 
-class EDASource(SensorSource):
+'''class EDASource(SensorSource):
     """Electrodermal activity (skin conductance) in microsiemens, typically 4 Hz."""
 
     def __init__(self, device, fs_hz: float = 4.0, **kw):
@@ -170,7 +170,7 @@ class SimulatedEDASource(SensorSource):
             out.append(Sample(t, tonic + phasic + self._rng.gauss(0, 0.01), q, self.name))
         return out
 
-
+'''
 # --------------------------------------------------------------------------- #
 # Local buffer (S9, S1)
 # --------------------------------------------------------------------------- #
