@@ -61,7 +61,7 @@ class Sample:
 def bpm_sample(t: float, bpm, quality: float = 1.0, source: str = "hr") -> Sample:
     """Build a heart-rate Sample from a BPM reading.
 
-    An impossible BPM (not a number, or outside HR_MIN_BPM.HR_MAX_BPM) gets quality 0.0, so the
+    An impossible BPM (not a number, or outside HR_MIN_BPM..HR_MAX_BPM) gets quality 0.0, so the
     existing rule "quality below MIN_SAMPLE_QUALITY counts as missing" drops it (S5). No new code
     path is needed downstream, and the bad reading is still counted when the buffer is polled.
     """
@@ -346,7 +346,7 @@ class FusedWindow:
     status: str                         # "ok" | "low_confidence" | "suppressed"
     missing_frac: float
     confidence: float
-    features: dict = field(default_factory=dict)
+    features: dict[str, float] = field(default_factory=dict)   # typed so f"{value:.1f}" passes the editor's type check
     note: str = AWARENESS_NOTE
 
 
