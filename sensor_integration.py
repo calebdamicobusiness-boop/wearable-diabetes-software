@@ -36,6 +36,10 @@ SUPPRESS_MISSING_FRAC = 0.50
 MIN_SAMPLE_QUALITY = 0.5    # samples below this count as missing
 MIN_WINDOW_QUALITY = 0.6
 
+# Heart-rate (BPM) validity range. Readings outside it are treated as sensor errors.
+HR_MIN_BPM = 30                 # starting values; confirm with advisors
+HR_MAX_BPM = 220
+
 # EDA decomposition (starting values; confirm against your sensor's sampling rate)
 EDA_TONIC_WINDOW_S = 30.0       # baseline smoothing window
 EDA_SCR_MIN_AMP_US = 0.05       # smallest phasic peak counted as a response (microsiemens)
@@ -52,6 +56,22 @@ class Sample:
     value: float
     quality: float      # 0..1 signal-quality index (use 1.0 if the sensor has none)
     source: str         # e.g. "cgm", "hr"
+
+
+def bpm_sample(t: float, bpm, quality: float = 1.0, source: str = "hr") -> Sample:
+    """Build a heart-rate Sample from a BPM reading.
+
+    An impossible BPM (not a number, or outside HR_MIN_BPM..HR_MAX_BPM) gets quality 0.0, so the
+    existing rule "quality below MIN_SAMPLE_QUALITY counts as missing" drops it (S5). No new code
+    path is needed downstream, and the bad reading is still counted when the buffer is polled.
+    """
+    try:
+        value = float(bpm)
+    except (TypeError, ValueError):
+        value = math.nan
+    if isinstance(bpm, bool) or not math.isfinite(value) or not HR_MIN_BPM <= value <= HR_MAX_BPM:
+        return Sample(t, 0.0, 0.0, source)          # 0.0, not NaN: SQLite would store NaN as NULL
+    return Sample(t, value, max(0.0, min(1.0, quality)), source)
 
 
 # --------------------------------------------------------------------------- #
@@ -103,6 +123,8 @@ class CSVReplaySource(SensorSource):
                 Sample(float(r["t"]), float(r["value"]), float(r.get("quality") or 1.0), name)
                 for r in csv.DictReader(f)
             ]
+        if name == "hr":                # a CSV of BPM gets the same range check as live data
+            self._rows = [bpm_sample(r.t, r.value, r.quality, name) for r in self._rows]
         self._i = 0
 
     def fetch(self):
@@ -123,16 +145,27 @@ class CGMSource(SensorSource):
 
 
 class HeartRateSource(SensorSource):
-    def __init__(self, device, **kw):
+    """Heart rate in BPM.
+
+    Call push() from the wearable's callback each time it reports a value. pipeline.poll() then
+    collects everything pushed since the last poll through fetch().
+    """
+
+    def __init__(self, device=None, **kw):
         super().__init__("hr", expected_period_s=30, **kw)
-        self.device = device            # BLE handle / wearable SDK
+        self.device = device            # BLE handle / wearable SDK (optional until chosen)
+        self._pending: list[Sample] = []
+
+    def push(self, bpm, t: Optional[float] = None, quality: float = 1.0) -> None:
+        """Add one reading. t defaults to now (UTC epoch seconds); quality is 0..1 if the device has one."""
+        self._pending.append(bpm_sample(time.time() if t is None else t, bpm, quality, self.name))
 
     def fetch(self):
-        # TODO: map BPM + signal-quality index from the wearable
-        raise NotImplementedError
+        out, self._pending = self._pending, []
+        return out
 
 
-'''class EDASource(SensorSource):
+class EDASource(SensorSource):
     """Electrodermal activity (skin conductance) in microsiemens, typically 4 Hz."""
 
     def __init__(self, device, fs_hz: float = 4.0, **kw):
@@ -170,7 +203,7 @@ class SimulatedEDASource(SensorSource):
             out.append(Sample(t, tonic + phasic + self._rng.gauss(0, 0.01), q, self.name))
         return out
 
-'''
+
 # --------------------------------------------------------------------------- #
 # Local buffer (S9, S1)
 # --------------------------------------------------------------------------- #
@@ -313,7 +346,7 @@ class FusedWindow:
     status: str                         # "ok" | "low_confidence" | "suppressed"
     missing_frac: float
     confidence: float
-    features: dict = field(default_factory=dict)
+    features: dict[str, float] = field(default_factory=dict)   # typed so f"{value:.1f}" passes the editor's type check
     note: str = AWARENESS_NOTE
 
 
