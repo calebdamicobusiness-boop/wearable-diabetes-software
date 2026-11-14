@@ -1,0 +1,65 @@
+import os
+import tempfile
+import unittest
+
+from sensor_integration import *
+
+
+def open_buffer(test: unittest.TestCase, path: str, **kw) -> SampleBuffer:
+    """Open a buffer and guarantee it is closed (Windows can't delete open SQLite files)."""
+    buf = SampleBuffer(path, **kw)
+    test.addCleanup(buf.close)
+    return buf
+
+
+class S9Tests(unittest.TestCase):
+    def setUp(self):
+        self.d = tempfile.TemporaryDirectory()
+        self.addCleanup(self.d.cleanup)          # runs AFTER buffers are closed (LIFO)
+        self.path = os.path.join(self.d.name, "b.db")
+
+    def test_memory_path_rejected(self):
+        with self.assertRaises(ValueError):
+            SampleBuffer(":memory:")
+        with self.assertRaises(TypeError):
+            SampleBuffer()
+        with self.assertRaises(TypeError):
+            IntegrationPipeline()
+
+    def test_survives_restart_and_resync_dedupes(self):
+        rows = [Sample(1000.0 + 300 * i, 100.0, 1.0, "cgm") for i in range(288)]  # 24 h
+        first = SampleBuffer(self.path)
+        first.add(rows)
+        first.add(rows)                           # re-sync: must not duplicate
+        first.close()                             # simulate app restart
+        with SampleBuffer(self.path) as second:
+            self.assertEqual(second.count("cgm"), 288)
+
+
+class GlucoseDisplayTests(unittest.TestCase):
+    def window(self, age_s):
+        now = 100_000.0
+        b = open_buffer(self, ":memory:", allow_memory=True)
+        b.add([Sample(now - age_s, 126.0, 1.0, "cgm")])
+        return fuse_window(b, {"glucose": "cgm"}, now)
+
+    def test_current_and_stale(self):
+        self.assertFalse(self.window(180).glucose_is_stale())
+        self.assertTrue(self.window(3600).glucose_is_stale())
+        self.assertIn("3 min old (current)", describe_latest_glucose(self.window(180)))
+        self.assertIn("60 min old (stale)", describe(self.window(3600)))
+
+    def test_units(self):
+        self.assertEqual(format_glucose(126), "126 mg/dL")
+        self.assertEqual(format_glucose(126, "mmol/L"), "7.0 mmol/L")
+        with self.assertRaises(ValueError):
+            format_glucose(126, "x")
+
+    def test_poor_quality_reading_ignored(self):
+        b = open_buffer(self, ":memory:", allow_memory=True)
+        b.add([Sample(99_000.0, 126.0, 0.1, "cgm")])
+        self.assertIsNone(fuse_window(b, {"glucose": "cgm"}, 100_000.0).glucose_last_t)
+
+
+if __name__ == "__main__":
+    unittest.main()
