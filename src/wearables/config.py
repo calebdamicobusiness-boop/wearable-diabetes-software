@@ -8,7 +8,8 @@ HEART_RATE = "heart_rate_bpm"
 SKIN_TEMP = "skin_temp_c"
 STEPS = "steps"
 SLEEPING = "sleeping"
-
+HR_MIN_BPM = 30
+HR_MAX_BPM = 220
 # PLACEHOLDER thresholds: confirm with advisors before relying on them.
 RAPID_RISE_MGDL_PER_30MIN = 40
 RAPID_DROP_MGDL_PER_30MIN = -40
