@@ -8,6 +8,10 @@ Maps to the VSD specs:
   S9  buffer >=24 h offline, zero lost samples (UNIQUE(source,t) dedupes on re-sync)
   S10 subgroup error report, flag subgroup error > overall * 1.2
 
+EDA (electrodermal activity, in microsiemens) is split into:
+  tonic  = slow baseline skin-conductance level (SCL)
+  phasic = fast skin-conductance responses (SCRs) riding on the baseline
+
 Stdlib only (Python 3.10+). To add a sensor: subclass SensorSource, implement
 fetch(), register it with the pipeline. Nothing else changes.
 """
@@ -32,6 +36,28 @@ SUPPRESS_MISSING_FRAC = 0.50
 MIN_SAMPLE_QUALITY = 0.5    # samples below this count as missing
 MIN_WINDOW_QUALITY = 0.6
 
+# Glucose display (S6). Data is always stored in mg/dL; convert only for display.
+MGDL_PER_MMOLL = 18.016
+# Target glucose range, always in mg/dL (convert only for display). Team value: 70-180 mg/dL.
+# A person's own range can differ, so keep these as settings and confirm with advisors.
+TARGET_LOW_MGDL = 70.0
+TARGET_HIGH_MGDL = 180.0
+GLUCOSE_UNITS = ("mg/dL", "mmol/L")
+DEFAULT_GLUCOSE_UNIT = "mg/dL"
+# A glucose reading older than this is labeled "stale". PLACEHOLDER: depends on the CGM
+# vendor path (some cloud paths delay data by an hour), so confirm with the hardware team.
+GLUCOSE_STALE_AFTER_S = 15 * 60
+
+# Heart-rate (BPM) validity range. Readings outside it are treated as sensor errors.
+HR_MIN_BPM = 30                 # starting values; confirm with advisors
+HR_MAX_BPM = 220
+
+# EDA decomposition (starting values; confirm against your sensor's sampling rate)
+EDA_TONIC_WINDOW_S = 30.0       # baseline smoothing window
+EDA_SCR_MIN_AMP_US = 0.05       # smallest phasic peak counted as a response (microsiemens)
+EDA_SCR_PEAK_HALF_WIN_S = 1.0   # a peak must be the max within +/- this many seconds
+EDA_SCR_MIN_SEP_S = 1.0         # minimum spacing between responses
+
 
 # --------------------------------------------------------------------------- #
 # Data model
@@ -42,6 +68,31 @@ class Sample:
     value: float
     quality: float      # 0..1 signal-quality index (use 1.0 if the sensor has none)
     source: str         # e.g. "cgm", "hr"
+
+
+def bpm_sample(t: float, bpm, quality: float = 1.0, source: str = "hr") -> Sample:
+    """Build a heart-rate Sample from a BPM reading.
+
+    An impossible BPM (not a number, or outside HR_MIN_BPM..HR_MAX_BPM) gets quality 0.0, so the
+    existing rule "quality below MIN_SAMPLE_QUALITY counts as missing" drops it (S5). No new code
+    path is needed downstream, and the bad reading is still counted when the buffer is polled.
+    """
+    try:
+        value = float(bpm)
+    except (TypeError, ValueError):
+        value = math.nan
+    if isinstance(bpm, bool) or not math.isfinite(value) or not HR_MIN_BPM <= value <= HR_MAX_BPM:
+        return Sample(t, 0.0, 0.0, source)          # 0.0, not NaN: SQLite would store NaN as NULL
+    return Sample(t, value, max(0.0, min(1.0, quality)), source)
+
+
+def format_glucose(mgdl: float, unit: str = DEFAULT_GLUCOSE_UNIT) -> str:
+    """'105 mg/dL' or '5.8 mmol/L' (S6). Input is always mg/dL."""
+    if unit == "mg/dL":
+        return f"{mgdl:.0f} mg/dL"
+    if unit == "mmol/L":
+        return f"{mgdl / MGDL_PER_MMOLL:.1f} mmol/L"
+    raise ValueError(f"unit must be one of {GLUCOSE_UNITS}, got {unit!r}")
 
 
 # --------------------------------------------------------------------------- #
@@ -93,6 +144,8 @@ class CSVReplaySource(SensorSource):
                 Sample(float(r["t"]), float(r["value"]), float(r.get("quality") or 1.0), name)
                 for r in csv.DictReader(f)
             ]
+        if name == "hr":                # a CSV of BPM gets the same range check as live data
+            self._rows = [bpm_sample(r.t, r.value, r.quality, name) for r in self._rows]
         self._i = 0
 
     def fetch(self):
@@ -113,20 +166,73 @@ class CGMSource(SensorSource):
 
 
 class HeartRateSource(SensorSource):
-    def __init__(self, device, **kw):
+    """Heart rate in BPM.
+
+    Call push() from the wearable's callback each time it reports a value. pipeline.poll() then
+    collects everything pushed since the last poll through fetch().
+    """
+
+    def __init__(self, device=None, **kw):
         super().__init__("hr", expected_period_s=30, **kw)
+        self.device = device            # BLE handle / wearable SDK (optional until chosen)
+        self._pending: list[Sample] = []
+
+    def push(self, bpm, t: Optional[float] = None, quality: float = 1.0) -> None:
+        """Add one reading. t defaults to now (UTC epoch seconds); quality is 0..1 if the device has one."""
+        self._pending.append(bpm_sample(time.time() if t is None else t, bpm, quality, self.name))
+
+    def fetch(self):
+        out, self._pending = self._pending, []
+        return out
+
+
+class EDASource(SensorSource):
+    """Electrodermal activity (skin conductance) in microsiemens, typically 4 Hz."""
+
+    def __init__(self, device, fs_hz: float = 4.0, **kw):
+        super().__init__("eda", expected_period_s=1.0 / fs_hz, **kw)
         self.device = device            # BLE handle / wearable SDK
 
     def fetch(self):
-        # TODO: map BPM + signal-quality index from the wearable
+        # TODO: return [Sample(t, microsiemens, quality, self.name), ...]
         raise NotImplementedError
+
+
+class SimulatedEDASource(SensorSource):
+    """Fake EDA: slow baseline + random skin-conductance responses (SCRs)."""
+
+    def __init__(self, name="eda", fs_hz=4.0, start_t=None, scr_per_min=4.0, seed=0):
+        super().__init__(name, expected_period_s=1.0 / fs_hz)
+        self._rng = random.Random(seed)
+        self._dt = 1.0 / fs_hz
+        self._next_t = start_t if start_t is not None else time.time()
+        self._rate = scr_per_min
+        self._events: list[tuple[float, float]] = []    # (onset, amplitude)
+
+    def fetch(self):
+        now, out = time.time(), []
+        while self._next_t <= now:
+            t = self._next_t
+            self._next_t += self._dt
+            if self._rng.random() < self._rate / 60.0 * self._dt:
+                self._events.append((t, self._rng.uniform(0.2, 0.8)))
+            self._events = [(o, a) for o, a in self._events if t - o < 30]
+            tonic = 4.0 + 0.8 * math.sin(t / 1800)
+            phasic = sum(a * 2.1 * (math.exp(-(t - o) / 3.0) - math.exp(-(t - o) / 0.75))
+                         for o, a in self._events)
+            q = 0.3 if self._rng.random() < 0.002 else 1.0
+            out.append(Sample(t, tonic + phasic + self._rng.gauss(0, 0.01), q, self.name))
+        return out
 
 
 # --------------------------------------------------------------------------- #
 # Local buffer (S9, S1)
 # --------------------------------------------------------------------------- #
 class SampleBuffer:
-    def __init__(self, path=":memory:", retention_s=72 * 3600):
+    def __init__(self, path: str, retention_s=72 * 3600, allow_memory: bool = False):
+        # The path is REQUIRED: an in-memory default silently loses data on restart (S9).
+        if path == ":memory:" and not allow_memory:
+            raise ValueError("SampleBuffer needs a real file path (allow_memory=True is for tests only).")
         self.db = sqlite3.connect(path)
         self.db.execute(
             "CREATE TABLE IF NOT EXISTS samples("
@@ -148,12 +254,109 @@ class SampleBuffer:
         )
         return [Sample(t, v, q, source) for t, v, q in rows]
 
+    def latest(self, source: str) -> Optional[Sample]:
+        """Newest usable sample (quality >= MIN_SAMPLE_QUALITY) for a source, or None."""
+        row = self.db.execute(
+            "SELECT t,value,quality FROM samples WHERE source=? AND quality>=? ORDER BY t DESC LIMIT 1",
+            (source, MIN_SAMPLE_QUALITY),
+        ).fetchone()
+        return Sample(row[0], row[1], row[2], source) if row else None
+
     def count(self, source: str) -> int:
         return self.db.execute("SELECT COUNT(*) FROM samples WHERE source=?", (source,)).fetchone()[0]
 
     def purge_old(self, now: float) -> None:
         with self.db:
             self.db.execute("DELETE FROM samples WHERE t < ?", (now - self.retention_s,))
+
+    def close(self) -> None:
+        """Release the SQLite file (required on Windows before the file can be deleted)."""
+        self.db.close()
+
+    def __enter__(self) -> "SampleBuffer":
+        return self
+
+    def __exit__(self, *exc) -> None:
+        self.close()
+
+
+# --------------------------------------------------------------------------- #
+# EDA: tonic / phasic separation
+# --------------------------------------------------------------------------- #
+@dataclass
+class EDAComponents:
+    t: list = field(default_factory=list)
+    tonic: list = field(default_factory=list)        # slow baseline level (SCL), microsiemens
+    phasic: list = field(default_factory=list)       # fast responses (SCR), microsiemens
+    quality: list = field(default_factory=list)
+    scr_events: list = field(default_factory=list)   # [(time, amplitude_uS), ...]
+
+    def tonic_samples(self, source: str) -> list[Sample]:
+        return [Sample(t, v, q, source) for t, v, q in zip(self.t, self.tonic, self.quality)]
+
+
+def _moving_average(vals: list[float], n: int) -> list[float]:
+    """Centered moving average (O(n) via cumulative sums); window shrinks at the edges."""
+    half = max(1, n) // 2
+    cs = [0.0]
+    for v in vals:
+        cs.append(cs[-1] + v)
+    L = len(vals)
+    out = []
+    for i in range(L):
+        lo, hi = max(0, i - half), min(L, i + half + 1)
+        out.append((cs[hi] - cs[lo]) / (hi - lo))
+    return out
+
+
+def decompose_eda(samples: list[Sample], tonic_window_s: float = EDA_TONIC_WINDOW_S,
+                  scr_min_amp: float = EDA_SCR_MIN_AMP_US, max_gap_s: float = 5.0) -> EDAComponents:
+    """Split raw EDA into tonic (slow baseline) and phasic (fast responses) and detect SCRs.
+
+    Simple, dependency-free method: a smoothed baseline (computed twice, the second time with
+    response peaks clipped off so they don't drag it upward) is the tonic part; the remainder
+    is phasic. For publication-grade results swap this function for cvxEDA / NeuroKit2
+    while keeping the same EDAComponents return type.
+    """
+    good = [s for s in samples if s.quality >= MIN_SAMPLE_QUALITY]
+    res = EDAComponents()
+    if len(good) < 3:
+        return res
+
+    segments, cur = [], [good[0]]                 # split wherever data has a real gap
+    for s in good[1:]:
+        if s.t - cur[-1].t > max_gap_s:
+            segments.append(cur)
+            cur = [s]
+        else:
+            cur.append(s)
+    segments.append(cur)
+
+    last_scr_t = -math.inf
+    for seg in segments:
+        if len(seg) < 3:
+            continue
+        fs = 1.0 / statistics.median(b.t - a.t for a, b in zip(seg, seg[1:]))
+        n = int(tonic_window_s * fs)
+        vals = [s.value for s in seg]
+        base = _moving_average(vals, n)
+        tonic = _moving_average([min(v, b) for v, b in zip(vals, base)], n)
+        phasic = [v - b for v, b in zip(vals, tonic)]
+
+        half = max(1, int(round(EDA_SCR_PEAK_HALF_WIN_S * fs)))
+        for i, p in enumerate(phasic):
+            if p < scr_min_amp:
+                continue
+            lo, hi = max(0, i - half), min(len(phasic), i + half + 1)
+            if p >= max(phasic[lo:hi]) and seg[i].t - last_scr_t >= EDA_SCR_MIN_SEP_S:
+                res.scr_events.append((seg[i].t, p))
+                last_scr_t = seg[i].t
+
+        res.t += [s.t for s in seg]
+        res.tonic += tonic
+        res.phasic += phasic
+        res.quality += [s.quality for s in seg]
+    return res
 
 
 # --------------------------------------------------------------------------- #
@@ -185,8 +388,18 @@ class FusedWindow:
     status: str                         # "ok" | "low_confidence" | "suppressed"
     missing_frac: float
     confidence: float
-    features: dict = field(default_factory=dict)
+    features: dict[str, float] = field(default_factory=dict)   # typed so f"{value:.1f}" passes the editor's type check
     note: str = AWARENESS_NOTE
+    as_of: float = 0.0                          # "now" the window was computed for (epoch s)
+    glucose_last_t: Optional[float] = None      # timestamp of newest usable glucose reading
+    glucose_last_mgdl: Optional[float] = None   # its value, always mg/dL
+
+    def glucose_age_s(self) -> Optional[float]:
+        return None if self.glucose_last_t is None else self.as_of - self.glucose_last_t
+
+    def glucose_is_stale(self) -> Optional[bool]:
+        age = self.glucose_age_s()
+        return None if age is None else age > GLUCOSE_STALE_AFTER_S
 
 
 def _slope_per_min(ys: list[tuple[int, float]], bin_s: float) -> float:
@@ -198,21 +411,31 @@ def _slope_per_min(ys: list[tuple[int, float]], bin_s: float) -> float:
 def fuse_window(buf: SampleBuffer, sources: dict[str, str], t_end: float,
                 n_bins: int = WINDOW_BINS, bin_s: float = BIN_S) -> FusedWindow:
     """sources maps role -> source name, e.g. {"glucose": "cgm", "hr": "hr"}."""
+    as_of = t_end
     t_end = math.floor(t_end / bin_s) * bin_s
     t0 = t_end - n_bins * bin_s
-    binned = {role: bin_signal(buf.query(name, t0, t_end), t0, n_bins, bin_s)
-              for role, name in sources.items()}
+    last_g = buf.latest(sources["glucose"]) if "glucose" in sources else None
+    g_t, g_v = (last_g.t, last_g.value) if last_g else (None, None)
+    binned: dict[str, list[BinValue]] = {}
+    eda_comp: Optional[EDAComponents] = None
+    for role, name in sources.items():
+        raw = buf.query(name, t0, t_end)
+        if role == "eda":                         # fuse the slow tonic level, keep SCRs separately
+            eda_comp = decompose_eda(raw)
+            raw = eda_comp.tonic_samples(name)
+        binned[role] = bin_signal(raw, t0, n_bins, bin_s)
 
     # A bin is usable only if EVERY source has a good value (fused features need all inputs)
     ok_idx = [i for i in range(n_bins) if all(binned[r][i].value is not None for r in binned)]
     missing = 1 - len(ok_idx) / n_bins
-    conf = (  # inherit the worst input quality
+    conf = (                                      # inherit the worst input quality
         min(statistics.fmean(binned[r][i].quality for i in ok_idx) for r in binned)
         if ok_idx else 0.0
     )
 
     if missing > SUPPRESS_MISSING_FRAC or not ok_idx:
-        return FusedWindow(t0, t_end, "suppressed", missing, conf)
+        return FusedWindow(t0, t_end, "suppressed", missing, conf,
+                           as_of=as_of, glucose_last_t=g_t, glucose_last_mgdl=g_v)
     status = "ok" if (missing <= MAX_MISSING_FRAC and conf >= MIN_WINDOW_QUALITY) else "low_confidence"
 
     feats: dict = {}
@@ -221,8 +444,17 @@ def fuse_window(buf: SampleBuffer, sources: dict[str, str], t_end: float,
         feats["glucose_mean"] = statistics.fmean(v for _, v in g)
         if len(g) >= 3:
             feats["glucose_slope_per_min"] = _slope_per_min(g, bin_s)
+        vals = [v for _, v in g]                  # share of usable bins in / below / above range
+        feats["pct_in_range"] = 100 * sum(TARGET_LOW_MGDL <= v <= TARGET_HIGH_MGDL for v in vals) / len(vals)
+        feats["pct_below_range"] = 100 * sum(v < TARGET_LOW_MGDL for v in vals) / len(vals)
+        feats["pct_above_range"] = 100 * sum(v > TARGET_HIGH_MGDL for v in vals) / len(vals)
     if "hr" in binned:
         feats["hr_mean"] = statistics.fmean(binned["hr"][i].value for i in ok_idx)
+    if eda_comp is not None and "eda" in binned:
+        feats["eda_tonic_mean"] = statistics.fmean(binned["eda"][i].value for i in ok_idx)
+        in_win = [a for t, a in eda_comp.scr_events if t0 <= t < t_end]
+        feats["scr_per_min"] = len(in_win) / (n_bins * bin_s / 60)
+        feats["scr_mean_amp"] = statistics.fmean(in_win) if in_win else 0.0
     if {"glucose", "hr"} <= binned.keys() and len(ok_idx) >= 4:
         gv = [binned["glucose"][i].value for i in ok_idx]
         hv = [binned["hr"][i].value for i in ok_idx]
@@ -230,29 +462,44 @@ def fuse_window(buf: SampleBuffer, sources: dict[str, str], t_end: float,
             feats["hr_glucose_corr"] = statistics.correlation(gv, hv)
         except statistics.StatisticsError:      # constant input
             feats["hr_glucose_corr"] = None
-    return FusedWindow(t0, t_end, status, missing, conf, feats)
+    return FusedWindow(t0, t_end, status, missing, conf, feats,
+                       as_of=as_of, glucose_last_t=g_t, glucose_last_mgdl=g_v)
 
 
-def describe(w: FusedWindow) -> str:
+def describe_latest_glucose(w: FusedWindow, unit: str = DEFAULT_GLUCOSE_UNIT) -> str:
+    """e.g. '105 mg/dL, 3 min old (current)': value, unit, age and whether it is stale."""
+    if w.glucose_last_mgdl is None:
+        return "no recent glucose reading"
+    state = "stale" if w.glucose_is_stale() else "current"
+    return f"{format_glucose(w.glucose_last_mgdl, unit)}, {w.glucose_age_s() / 60:.0f} min old ({state})"
+
+
+def describe(w: FusedWindow, unit: str = DEFAULT_GLUCOSE_UNIT) -> str:
     """Descriptive, awareness-only text (S4). Extend with rule-based insights."""
+    latest = f"Latest glucose: {describe_latest_glucose(w, unit)}. " if w.glucose_last_t is not None else ""
     if w.status == "suppressed":
-        return f"Not enough good data in this window to show an insight. {w.note}"
+        return f"Not enough good data in this window to show an insight. {latest}{w.note}"
     f, tag = w.features, ("" if w.status == "ok" else " (low confidence)")
     parts = []
     if "glucose_slope_per_min" in f:
         s = f["glucose_slope_per_min"]
         parts.append("glucose rising" if s > 0.5 else "glucose falling" if s < -0.5 else "glucose steady")
+    if "pct_in_range" in f:                     # descriptive only: no "high/low" judgments
+        lo, hi = format_glucose(TARGET_LOW_MGDL, unit), format_glucose(TARGET_HIGH_MGDL, unit)
+        parts.append(f"{f['pct_in_range']:.0f}% of readings within {lo} to {hi}")
     if "hr_mean" in f:
         parts.append(f"average heart rate {f['hr_mean']:.0f} bpm")
-    return ("; ".join(parts) or "no features") + tag + ". " + w.note
+    if "scr_per_min" in f:
+        parts.append(f"{f['scr_per_min']:.1f} skin-conductance responses per minute")
+    return ("; ".join(parts) or "no features") + tag + ". " + latest + w.note
 
 
 # --------------------------------------------------------------------------- #
 # Pipeline
 # --------------------------------------------------------------------------- #
 class IntegrationPipeline:
-    def __init__(self, buffer: Optional[SampleBuffer] = None):
-        self.buffer = buffer or SampleBuffer()
+    def __init__(self, buffer: SampleBuffer):
+        self.buffer = buffer            # required: build it with a real file path (S9)
         self.sources: list[SensorSource] = []
 
     def register(self, src: SensorSource) -> None:
@@ -301,14 +548,16 @@ def subgroup_error_report(records: list[dict], flag_ratio: float = 1.2) -> dict:
 # --------------------------------------------------------------------------- #
 if __name__ == "__main__":
     start = time.time() - 2 * 3600                       # pretend 2 h already recorded
-    pipe = IntegrationPipeline()
+    pipe = IntegrationPipeline(SampleBuffer("demo_buffer.db"))   # *.db is git-ignored
     pipe.register(SimulatedSource("cgm", 300, 120, 30, 3, start, seed=1))
     pipe.register(SimulatedSource("hr", 30, 75, 12, 4, start, seed=2))
+    pipe.register(SimulatedEDASource("eda", start_t=start, seed=3))
     print("added:", pipe.poll())
-    w = pipe.latest({"glucose": "cgm", "hr": "hr"})
+    w = pipe.latest({"glucose": "cgm", "hr": "hr", "eda": "eda"})
     print(f"status={w.status} missing={w.missing_frac:.0%} confidence={w.confidence:.2f}")
     print({k: (round(v, 2) if v is not None else None) for k, v in w.features.items()})
     print(describe(w))
+    print("latest glucose:", describe_latest_glucose(w), "| in mmol/L:", describe_latest_glucose(w, "mmol/L"))
     print(subgroup_error_report([
         {"group": "A", "error": 4.0}, {"group": "A", "error": 5.0},
         {"group": "B", "error": 8.0}, {"group": "B", "error": 7.0},

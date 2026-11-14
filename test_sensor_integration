@@ -61,5 +61,28 @@ class GlucoseDisplayTests(unittest.TestCase):
         self.assertIsNone(fuse_window(b, {"glucose": "cgm"}, 100_000.0).glucose_last_t)
 
 
+class RangeTests(unittest.TestCase):
+    def test_time_in_range(self):
+        now = 100_000.0
+        b = open_buffer(self, ":memory:", allow_memory=True)
+        vals = [60] * 3 + [100] * 3 + [150] * 3 + [200] * 3   # 12 bins: 25% below, 50% in, 25% above
+        b.add([Sample(now - 3600 + 300 * i + 60, v, 1.0, "cgm") for i, v in enumerate(vals)])
+        f = fuse_window(b, {"glucose": "cgm"}, now).features
+        self.assertEqual((f["pct_below_range"], f["pct_in_range"], f["pct_above_range"]), (25.0, 50.0, 25.0))
+
+    def test_boundaries_count_as_in_range(self):
+        now = 100_000.0
+        b = open_buffer(self, ":memory:", allow_memory=True)
+        b.add([Sample(now - 3600 + 300 * i + 60, v, 1.0, "cgm") for i, v in enumerate([70, 180] * 6)])
+        self.assertEqual(fuse_window(b, {"glucose": "cgm"}, now).features["pct_in_range"], 100.0)
+
+    def test_description_wording(self):
+        now = 100_000.0
+        b = open_buffer(self, ":memory:", allow_memory=True)
+        b.add([Sample(now - 3600 + 300 * i + 60, 100, 1.0, "cgm") for i in range(12)])
+        text = describe(fuse_window(b, {"glucose": "cgm"}, now))
+        self.assertIn("100% of readings within 70 mg/dL to 180 mg/dL", text)
+
+
 if __name__ == "__main__":
     unittest.main()
