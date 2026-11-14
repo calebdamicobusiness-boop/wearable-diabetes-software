@@ -36,6 +36,14 @@ SUPPRESS_MISSING_FRAC = 0.50
 MIN_SAMPLE_QUALITY = 0.5    # samples below this count as missing
 MIN_WINDOW_QUALITY = 0.6
 
+# Glucose display (S6). Data is always stored in mg/dL; convert only for display.
+MGDL_PER_MMOLL = 18.016
+GLUCOSE_UNITS = ("mg/dL", "mmol/L")
+DEFAULT_GLUCOSE_UNIT = "mg/dL"
+# A glucose reading older than this is labeled "stale". PLACEHOLDER: depends on the CGM
+# vendor path (some cloud paths delay data by an hour), so confirm with the hardware team.
+GLUCOSE_STALE_AFTER_S = 15 * 60
+
 # Heart-rate (BPM) validity range. Readings outside it are treated as sensor errors.
 HR_MIN_BPM = 30                 # starting values; confirm with advisors
 HR_MAX_BPM = 220
@@ -72,6 +80,15 @@ def bpm_sample(t: float, bpm, quality: float = 1.0, source: str = "hr") -> Sampl
     if isinstance(bpm, bool) or not math.isfinite(value) or not HR_MIN_BPM <= value <= HR_MAX_BPM:
         return Sample(t, 0.0, 0.0, source)          # 0.0, not NaN: SQLite would store NaN as NULL
     return Sample(t, value, max(0.0, min(1.0, quality)), source)
+
+
+def format_glucose(mgdl: float, unit: str = DEFAULT_GLUCOSE_UNIT) -> str:
+    """'105 mg/dL' or '5.8 mmol/L' (S6). Input is always mg/dL."""
+    if unit == "mg/dL":
+        return f"{mgdl:.0f} mg/dL"
+    if unit == "mmol/L":
+        return f"{mgdl / MGDL_PER_MMOLL:.1f} mmol/L"
+    raise ValueError(f"unit must be one of {GLUCOSE_UNITS}, got {unit!r}")
 
 
 # --------------------------------------------------------------------------- #
@@ -208,7 +225,10 @@ class SimulatedEDASource(SensorSource):
 # Local buffer (S9, S1)
 # --------------------------------------------------------------------------- #
 class SampleBuffer:
-    def __init__(self, path=":memory:", retention_s=72 * 3600):
+    def __init__(self, path: str, retention_s=72 * 3600, allow_memory: bool = False):
+        # The path is REQUIRED: an in-memory default silently loses data on restart (S9).
+        if path == ":memory:" and not allow_memory:
+            raise ValueError("SampleBuffer needs a real file path (allow_memory=True is for tests only).")
         self.db = sqlite3.connect(path)
         self.db.execute(
             "CREATE TABLE IF NOT EXISTS samples("
@@ -230,12 +250,30 @@ class SampleBuffer:
         )
         return [Sample(t, v, q, source) for t, v, q in rows]
 
+    def latest(self, source: str) -> Optional[Sample]:
+        """Newest usable sample (quality >= MIN_SAMPLE_QUALITY) for a source, or None."""
+        row = self.db.execute(
+            "SELECT t,value,quality FROM samples WHERE source=? AND quality>=? ORDER BY t DESC LIMIT 1",
+            (source, MIN_SAMPLE_QUALITY),
+        ).fetchone()
+        return Sample(row[0], row[1], row[2], source) if row else None
+
     def count(self, source: str) -> int:
         return self.db.execute("SELECT COUNT(*) FROM samples WHERE source=?", (source,)).fetchone()[0]
 
     def purge_old(self, now: float) -> None:
         with self.db:
             self.db.execute("DELETE FROM samples WHERE t < ?", (now - self.retention_s,))
+
+    def close(self) -> None:
+        """Release the SQLite file (required on Windows before the file can be deleted)."""
+        self.db.close()
+
+    def __enter__(self) -> "SampleBuffer":
+        return self
+
+    def __exit__(self, *exc) -> None:
+        self.close()
 
 
 # --------------------------------------------------------------------------- #
@@ -348,6 +386,16 @@ class FusedWindow:
     confidence: float
     features: dict[str, float] = field(default_factory=dict)   # typed so f"{value:.1f}" passes the editor's type check
     note: str = AWARENESS_NOTE
+    as_of: float = 0.0                          # "now" the window was computed for (epoch s)
+    glucose_last_t: Optional[float] = None      # timestamp of newest usable glucose reading
+    glucose_last_mgdl: Optional[float] = None   # its value, always mg/dL
+
+    def glucose_age_s(self) -> Optional[float]:
+        return None if self.glucose_last_t is None else self.as_of - self.glucose_last_t
+
+    def glucose_is_stale(self) -> Optional[bool]:
+        age = self.glucose_age_s()
+        return None if age is None else age > GLUCOSE_STALE_AFTER_S
 
 
 def _slope_per_min(ys: list[tuple[int, float]], bin_s: float) -> float:
@@ -359,8 +407,11 @@ def _slope_per_min(ys: list[tuple[int, float]], bin_s: float) -> float:
 def fuse_window(buf: SampleBuffer, sources: dict[str, str], t_end: float,
                 n_bins: int = WINDOW_BINS, bin_s: float = BIN_S) -> FusedWindow:
     """sources maps role -> source name, e.g. {"glucose": "cgm", "hr": "hr"}."""
+    as_of = t_end
     t_end = math.floor(t_end / bin_s) * bin_s
     t0 = t_end - n_bins * bin_s
+    last_g = buf.latest(sources["glucose"]) if "glucose" in sources else None
+    g_t, g_v = (last_g.t, last_g.value) if last_g else (None, None)
     binned: dict[str, list[BinValue]] = {}
     eda_comp: Optional[EDAComponents] = None
     for role, name in sources.items():
@@ -379,7 +430,8 @@ def fuse_window(buf: SampleBuffer, sources: dict[str, str], t_end: float,
     )
 
     if missing > SUPPRESS_MISSING_FRAC or not ok_idx:
-        return FusedWindow(t0, t_end, "suppressed", missing, conf)
+        return FusedWindow(t0, t_end, "suppressed", missing, conf,
+                           as_of=as_of, glucose_last_t=g_t, glucose_last_mgdl=g_v)
     status = "ok" if (missing <= MAX_MISSING_FRAC and conf >= MIN_WINDOW_QUALITY) else "low_confidence"
 
     feats: dict = {}
@@ -402,13 +454,23 @@ def fuse_window(buf: SampleBuffer, sources: dict[str, str], t_end: float,
             feats["hr_glucose_corr"] = statistics.correlation(gv, hv)
         except statistics.StatisticsError:      # constant input
             feats["hr_glucose_corr"] = None
-    return FusedWindow(t0, t_end, status, missing, conf, feats)
+    return FusedWindow(t0, t_end, status, missing, conf, feats,
+                       as_of=as_of, glucose_last_t=g_t, glucose_last_mgdl=g_v)
 
 
-def describe(w: FusedWindow) -> str:
+def describe_latest_glucose(w: FusedWindow, unit: str = DEFAULT_GLUCOSE_UNIT) -> str:
+    """e.g. '105 mg/dL, 3 min old (current)': value, unit, age and whether it is stale."""
+    if w.glucose_last_mgdl is None:
+        return "no recent glucose reading"
+    state = "stale" if w.glucose_is_stale() else "current"
+    return f"{format_glucose(w.glucose_last_mgdl, unit)}, {w.glucose_age_s() / 60:.0f} min old ({state})"
+
+
+def describe(w: FusedWindow, unit: str = DEFAULT_GLUCOSE_UNIT) -> str:
     """Descriptive, awareness-only text (S4). Extend with rule-based insights."""
+    latest = f"Latest glucose: {describe_latest_glucose(w, unit)}. " if w.glucose_last_t is not None else ""
     if w.status == "suppressed":
-        return f"Not enough good data in this window to show an insight. {w.note}"
+        return f"Not enough good data in this window to show an insight. {latest}{w.note}"
     f, tag = w.features, ("" if w.status == "ok" else " (low confidence)")
     parts = []
     if "glucose_slope_per_min" in f:
@@ -418,15 +480,15 @@ def describe(w: FusedWindow) -> str:
         parts.append(f"average heart rate {f['hr_mean']:.0f} bpm")
     if "scr_per_min" in f:
         parts.append(f"{f['scr_per_min']:.1f} skin-conductance responses per minute")
-    return ("; ".join(parts) or "no features") + tag + ". " + w.note
+    return ("; ".join(parts) or "no features") + tag + ". " + latest + w.note
 
 
 # --------------------------------------------------------------------------- #
 # Pipeline
 # --------------------------------------------------------------------------- #
 class IntegrationPipeline:
-    def __init__(self, buffer: Optional[SampleBuffer] = None):
-        self.buffer = buffer or SampleBuffer()
+    def __init__(self, buffer: SampleBuffer):
+        self.buffer = buffer            # required: build it with a real file path (S9)
         self.sources: list[SensorSource] = []
 
     def register(self, src: SensorSource) -> None:
@@ -475,7 +537,7 @@ def subgroup_error_report(records: list[dict], flag_ratio: float = 1.2) -> dict:
 # --------------------------------------------------------------------------- #
 if __name__ == "__main__":
     start = time.time() - 2 * 3600                       # pretend 2 h already recorded
-    pipe = IntegrationPipeline()
+    pipe = IntegrationPipeline(SampleBuffer("demo_buffer.db"))   # *.db is git-ignored
     pipe.register(SimulatedSource("cgm", 300, 120, 30, 3, start, seed=1))
     pipe.register(SimulatedSource("hr", 30, 75, 12, 4, start, seed=2))
     pipe.register(SimulatedEDASource("eda", start_t=start, seed=3))
@@ -484,6 +546,7 @@ if __name__ == "__main__":
     print(f"status={w.status} missing={w.missing_frac:.0%} confidence={w.confidence:.2f}")
     print({k: (round(v, 2) if v is not None else None) for k, v in w.features.items()})
     print(describe(w))
+    print("latest glucose:", describe_latest_glucose(w), "| in mmol/L:", describe_latest_glucose(w, "mmol/L"))
     print(subgroup_error_report([
         {"group": "A", "error": 4.0}, {"group": "A", "error": 5.0},
         {"group": "B", "error": 8.0}, {"group": "B", "error": 7.0},
