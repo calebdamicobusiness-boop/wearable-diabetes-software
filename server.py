@@ -11,7 +11,7 @@ import sensor_integration as si
 
 ROOT = Path(__file__).resolve().parent
 DB = ROOT / "wearables_demo.db"
-start = time.time() - 2 * 3600
+start = time.time() - 6 * 3600
 buffer = si.SampleBuffer(str(DB))
 pipeline = si.IntegrationPipeline(buffer)
 pipeline.register(si.SimulatedSource("cgm", 300, 112, 17, 2.5, start, seed=12))
@@ -38,6 +38,10 @@ class Handler(SimpleHTTPRequestHandler):
             "as_of": now,
             "glucose_mgdl": window.glucose_last_mgdl,
             "glucose_age_seconds": window.glucose_age_s(),
+            "glucose_history": [
+                {"t": sample.t, "mgdl": sample.value, "quality": sample.quality}
+                for sample in buffer.query("cgm", now - 6 * 3600, now + 1)
+            ],
             "heart_rate_bpm": window.features.get("hr_mean"),
             "eda_tonic_us": window.features.get("eda_tonic_mean"),
             "skin_responses_per_minute": window.features.get("scr_per_min"),

@@ -1,13 +1,153 @@
-const unitToggle=document.querySelector('#unitToggle');let mmol=false;
-document.querySelector('#today').textContent=new Intl.DateTimeFormat(undefined,{weekday:'long',month:'long',day:'numeric'}).format(new Date()).toUpperCase();
-const targetBand=document.querySelector('.target-band');if(targetBand){const topFor=value=>((180-value)/(180-60))*114;targetBand.setAttribute('d',`M0 ${topFor(180)} H340 V${topFor(70)} H0Z`);}
-function updateUnits(){const label=mmol?'mmol/L':'mg/dL';unitToggle.innerHTML=`${label} <span>⌄</span>`;document.querySelector('#settingsUnitToggle').innerHTML=`${label} <span>⌄</span>`;document.querySelector('#unit').textContent=label;document.querySelector('#signalsUnit').textContent=label;const value=window.latestGlucose??112;document.querySelector('#glucose').textContent=mmol?(value/18.016).toFixed(1):Math.round(value);document.querySelector('#signalsGlucose').textContent=mmol?(value/18.016).toFixed(1):Math.round(value);}
-unitToggle.addEventListener('click',()=>{mmol=!mmol;updateUnits()});
-document.querySelector('#settingsUnitToggle').addEventListener('click',()=>{mmol=!mmol;updateUnits()});
-const toast=document.querySelector('#toast');let timer;
-function showToast(message){toast.textContent=message;toast.classList.add('show');clearTimeout(timer);timer=setTimeout(()=>toast.classList.remove('show'),2300)}
-document.querySelector('#detailsBtn').addEventListener('click',()=>showToast('Showing a sample activity and glucose pattern.'));
-function showScreen(id){document.querySelectorAll('main').forEach(s=>s.hidden=s.id!==id);document.querySelectorAll('.tabbar a').forEach(a=>a.classList.toggle('active',a.dataset.screen===id));window.scrollTo({top:0,behavior:'smooth'});}
-document.querySelectorAll('.tabbar a').forEach(a=>a.addEventListener('click',e=>{e.preventDefault();showScreen(a.dataset.screen)}));
-if('serviceWorker'in navigator)window.addEventListener('load',()=>navigator.serviceWorker.register('./service-worker.js',{updateViaCache:'none'}).then(reg=>reg.update()).catch(()=>{}));
-fetch('./api/summary',{cache:'no-store'}).then(r=>r.ok?r.json():Promise.reject()).then(data=>{const note=data.disclaimer;if(note)document.querySelector('#disclaimerText').textContent=note;if(data.glucose_mgdl!==null){window.latestGlucose=data.glucose_mgdl;updateUnits();const age=Math.max(0,Math.round(data.glucose_age_seconds/60));document.querySelector('.card-foot b').textContent=`${age} min ago`;document.querySelector('#signalsAge').textContent=`${age} min ago`;document.querySelector('.live').innerHTML='<i></i> Simulated · Python pipeline';document.querySelector('.signal-card:nth-child(1) strong').innerHTML=`${Math.round(data.heart_rate_bpm)} <small>bpm</small>`;document.querySelector('.signal-card:nth-child(3) strong').innerHTML=`${Number(data.eda_tonic_us).toFixed(1)} <small>μS tonic</small>`;document.querySelector('#signalsHr').innerHTML=`${Math.round(data.heart_rate_bpm)} <small>bpm</small>`;document.querySelector('#signalsEda').innerHTML=`${Number(data.eda_tonic_us).toFixed(1)} <small>μS tonic</small>`;}}).catch(()=>{});
+const unitToggle = document.querySelector('#unitToggle');
+let mmol = false;
+window.latestGlucose = 112;
+
+document.querySelector('#today').textContent = new Intl.DateTimeFormat(undefined, {
+  weekday: 'long', month: 'long', day: 'numeric'
+}).format(new Date()).toUpperCase();
+
+const chart = {
+  width: 340,
+  height: 114,
+  min: 40,
+  max: 250,
+  hours: 6,
+  low: 70,
+  high: 180
+};
+const svgNS = 'http://www.w3.org/2000/svg';
+const targetBand = document.querySelector('#targetBand');
+const chartY = value => ((chart.max - value) / (chart.max - chart.min)) * chart.height;
+targetBand.setAttribute('d', `M0 ${chartY(chart.high)} H${chart.width} V${chartY(chart.low)} H0Z`);
+
+function updateUnits() {
+  const label = mmol ? 'mmol/L' : 'mg/dL';
+  unitToggle.innerHTML = `${label} <span>⌄</span>`;
+  document.querySelector('#settingsUnitToggle').innerHTML = `${label} <span>⌄</span>`;
+  document.querySelector('#unit').textContent = label;
+  document.querySelector('#signalsUnit').textContent = label;
+  const value = window.latestGlucose;
+  const display = mmol ? (value / 18.016).toFixed(1) : Math.round(value);
+  document.querySelector('#glucose').textContent = display;
+  document.querySelector('#signalsGlucose').textContent = display;
+  document.querySelector('#rangeLegend').innerHTML = mmol
+    ? 'Low &lt;3.9 mmol/L <span>·</span> High &gt;10.0 mmol/L'
+    : 'Low &lt;70 mg/dL <span>·</span> High &gt;180 mg/dL';
+}
+
+function renderGlucoseHistory(history) {
+  if (!Array.isArray(history) || history.length < 2) return;
+  const now = Date.now() / 1000;
+  const span = chart.hours * 3600;
+  const samples = history
+    .filter(sample => Number.isFinite(sample.t) && Number.isFinite(sample.mgdl) && sample.quality >= 0.5)
+    .sort((a, b) => a.t - b.t);
+  if (samples.length < 2) return;
+
+  const points = samples.map(sample => ({
+    sample,
+    x: Math.max(0, Math.min(chart.width, ((sample.t - (now - span)) / span) * chart.width)),
+    y: Math.max(0, Math.min(chart.height, chartY(sample.mgdl)))
+  }));
+  const line = points.map((point, i) => `${i ? 'L' : 'M'}${point.x.toFixed(1)} ${point.y.toFixed(1)}`).join(' ');
+  document.querySelector('#glucoseLine').setAttribute('d', line);
+  document.querySelector('#glucoseArea').setAttribute(
+    'd', `${line} L${points.at(-1).x.toFixed(1)} ${chart.height} L${points[0].x.toFixed(1)} ${chart.height} Z`
+  );
+  const latest = points.at(-1);
+  document.querySelector('#latestDot').setAttribute('cx', latest.x.toFixed(1));
+  document.querySelector('#latestDot').setAttribute('cy', latest.y.toFixed(1));
+
+  const flags = document.querySelector('#glucoseFlags');
+  flags.replaceChildren();
+  let previousFlag = null;
+  let highCount = 0;
+  let lowCount = 0;
+  for (const point of points) {
+    const flag = point.sample.mgdl < chart.low ? 'low' : point.sample.mgdl > chart.high ? 'high' : null;
+    if (!flag) {
+      previousFlag = null;
+      continue;
+    }
+    if (flag === 'low') lowCount++;
+    else highCount++;
+
+    const marker = document.createElementNS(svgNS, 'circle');
+    marker.setAttribute('cx', point.x.toFixed(1));
+    marker.setAttribute('cy', point.y.toFixed(1));
+    marker.setAttribute('r', '4.5');
+    marker.setAttribute('class', `flag-marker ${flag}`);
+    const time = new Date(point.sample.t * 1000).toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' });
+    const title = document.createElementNS(svgNS, 'title');
+    title.textContent = `${flag === 'low' ? 'Low' : 'High'} glucose: ${Math.round(point.sample.mgdl)} mg/dL at ${time}`;
+    marker.append(title);
+    flags.append(marker);
+
+    if (flag !== previousFlag) {
+      const label = document.createElementNS(svgNS, 'text');
+      label.setAttribute('x', Math.max(18, Math.min(chart.width - 18, point.x)).toFixed(1));
+      label.setAttribute('y', (point.y < 22 ? point.y + 17 : point.y - 9).toFixed(1));
+      label.setAttribute('text-anchor', 'middle');
+      label.setAttribute('class', `flag-label ${flag}`);
+      label.textContent = flag === 'low' ? 'LOW' : 'HIGH';
+      flags.append(label);
+    }
+    previousFlag = flag;
+  }
+  const summary = highCount || lowCount
+    ? `${highCount} high and ${lowCount} low readings in the displayed window.`
+    : 'No displayed readings below 70 or above 180 mg/dL.';
+  document.querySelector('#flagSummary').textContent = summary;
+  document.querySelector('.chart').setAttribute(
+    'aria-label', `Six-hour glucose trend. ${summary} Readings below 70 mg/dL are marked Low; readings above 180 mg/dL are marked High.`
+  );
+}
+
+unitToggle.addEventListener('click', () => { mmol = !mmol; updateUnits(); });
+document.querySelector('#settingsUnitToggle').addEventListener('click', () => { mmol = !mmol; updateUnits(); });
+
+const toast = document.querySelector('#toast');
+let timer;
+function showToast(message) {
+  toast.textContent = message;
+  toast.classList.add('show');
+  clearTimeout(timer);
+  timer = setTimeout(() => toast.classList.remove('show'), 2300);
+}
+
+document.querySelector('#detailsBtn').addEventListener('click', () => showToast('Showing a sample activity and glucose pattern.'));
+function showScreen(id) {
+  document.querySelectorAll('main').forEach(screen => { screen.hidden = screen.id !== id; });
+  document.querySelectorAll('.tabbar a').forEach(link => link.classList.toggle('active', link.dataset.screen === id));
+  window.scrollTo({ top: 0, behavior: 'smooth' });
+}
+document.querySelectorAll('.tabbar a').forEach(link => link.addEventListener('click', event => {
+  event.preventDefault();
+  showScreen(link.dataset.screen);
+}));
+
+if ('serviceWorker' in navigator) {
+  window.addEventListener('load', () => navigator.serviceWorker.register('./service-worker.js', { updateViaCache: 'none' })
+    .then(registration => registration.update()).catch(() => {}));
+}
+
+updateUnits();
+fetch('./api/summary', { cache: 'no-store' })
+  .then(response => response.ok ? response.json() : Promise.reject())
+  .then(data => {
+    if (data.disclaimer) document.querySelector('#disclaimerText').textContent = data.disclaimer;
+    renderGlucoseHistory(data.glucose_history);
+    if (data.glucose_mgdl !== null && data.glucose_mgdl !== undefined) {
+      window.latestGlucose = data.glucose_mgdl;
+      updateUnits();
+      const age = Math.max(0, Math.round(data.glucose_age_seconds / 60));
+      document.querySelector('.card-foot b').textContent = `${age} min ago`;
+      document.querySelector('#signalsAge').textContent = `${age} min ago`;
+      document.querySelector('.live').innerHTML = '<i></i> Simulated · Python pipeline';
+      document.querySelector('#home .signal-grid .signal-card:nth-child(1) strong').innerHTML = `${Math.round(data.heart_rate_bpm)} <small>bpm</small>`;
+      document.querySelector('#home .signal-grid .signal-card:nth-child(3) strong').innerHTML = `${Number(data.eda_tonic_us).toFixed(1)} <small>μS tonic</small>`;
+      document.querySelector('#signalsHr').innerHTML = `${Math.round(data.heart_rate_bpm)} <small>bpm</small>`;
+      document.querySelector('#signalsEda').innerHTML = `${Number(data.eda_tonic_us).toFixed(1)} <small>μS tonic</small>`;
+    }
+  })
+  .catch(() => {});
