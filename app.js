@@ -1,0 +1,9 @@
+const unitToggle=document.querySelector('#unitToggle');let mmol=false;
+document.querySelector('#today').textContent=new Intl.DateTimeFormat(undefined,{weekday:'long',month:'long',day:'numeric'}).format(new Date()).toUpperCase();
+unitToggle.addEventListener('click',()=>{mmol=!mmol;document.querySelector('#glucose').textContent=mmol?'6.2':'112';document.querySelector('#unit').textContent=mmol?'mmol/L':'mg/dL';unitToggle.innerHTML=`${mmol?'mmol/L':'mg/dL'} <span>⌄</span>`;});
+const toast=document.querySelector('#toast');let timer;
+function showToast(message){toast.textContent=message;toast.classList.add('show');clearTimeout(timer);timer=setTimeout(()=>toast.classList.remove('show'),2300)}
+document.querySelector('#detailsBtn').addEventListener('click',()=>showToast('Showing a sample activity and glucose pattern.'));
+document.querySelectorAll('.tabbar a').forEach(a=>a.addEventListener('click',e=>{e.preventDefault();document.querySelectorAll('.tabbar a').forEach(x=>x.classList.remove('active'));a.classList.add('active');if(a.textContent.trim()!=='Today')showToast(`${a.textContent.trim()} view is coming next.`)}));
+if('serviceWorker'in navigator)window.addEventListener('load',()=>navigator.serviceWorker.register('./service-worker.js').catch(()=>{}));
+fetch('./api/summary').then(r=>r.ok?r.json():Promise.reject()).then(data=>{if(data.glucose_mgdl!==null){document.querySelector('#glucose').textContent=mmol?(data.glucose_mgdl/18.016).toFixed(1):Math.round(data.glucose_mgdl);document.querySelector('.card-foot b').textContent=`${Math.max(0,Math.round(data.glucose_age_seconds/60))} min ago`;document.querySelector('.live').innerHTML='<i></i> Simulated · Python pipeline';document.querySelector('.signal-card:nth-child(1) strong').innerHTML=`${Math.round(data.heart_rate_bpm)} <small>bpm</small>`;document.querySelector('.signal-card:nth-child(3) strong').innerHTML=`${Number(data.eda_tonic_us).toFixed(1)} <small>μS tonic</small>`;}}).catch(()=>{});
