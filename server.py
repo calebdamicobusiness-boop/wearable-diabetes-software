@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import json
+import argparse
 import time
 from http.server import SimpleHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
@@ -43,7 +44,7 @@ class Handler(SimpleHTTPRequestHandler):
             "confidence": window.confidence,
             "status": window.status,
             "description": si.describe(window),
-            "awareness_note": si.AWARENESS_NOTE,
+            "disclaimer": si.DISCLAIMER,
         }
         body = json.dumps(payload).encode("utf-8")
         self.send_response(200)
@@ -55,6 +56,10 @@ class Handler(SimpleHTTPRequestHandler):
 
 
 if __name__ == "__main__":
-    print("Wearables demo running at http://localhost:8000")
+    parser = argparse.ArgumentParser(description="Run the Wearables mobile app demo server.")
+    parser.add_argument("port", nargs="?", type=int, default=8000,
+                        help="port to serve on (default: 8000)")
+    args = parser.parse_args()
+    print(f"Wearables demo running at http://localhost:{args.port}")
     print("This demo uses simulated samples; no real health-device data is connected.")
-    ThreadingHTTPServer(("0.0.0.0", 8000), Handler).serve_forever()
+    ThreadingHTTPServer(("0.0.0.0", args.port), Handler).serve_forever()

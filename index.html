@@ -3,7 +3,7 @@
 <head>
   <meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
   <meta name="theme-color" content="#101b2b"><meta name="apple-mobile-web-app-capable" content="yes"><meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
-  <meta name="description" content="Wearables glucose and activity awareness dashboard"><link rel="manifest" href="manifest.webmanifest"><link rel="apple-touch-icon" href="icon.svg"><link rel="stylesheet" href="styles.css"><title>Wearables · Daily overview</title>
+  <meta name="description" content="Wearables glucose and activity awareness dashboard"><link rel="manifest" href="manifest.webmanifest"><link rel="apple-touch-icon" href="icon.svg"><link rel="stylesheet" href="styles.css?v=2"><title>Wearables · Daily overview</title>
 </head>
 <body>
   <div class="app-shell">
@@ -14,8 +14,27 @@
       <section class="section-heading"><div><p class="eyebrow">SIGNALS AT A GLANCE</p><h2>Today so far</h2></div><button class="more" aria-label="More options">···</button></section>
       <section class="signal-grid"><article class="signal-card"><div class="signal-icon heart">♡</div><p>Heart rate</p><strong>76 <small>bpm</small></strong><span class="signal-note"><span class="mini-line rose">⌁</span> Resting range</span></article><article class="signal-card"><div class="signal-icon activity">↗</div><p>Movement</p><strong>4,820 <small>steps</small></strong><span class="signal-note">A little more than yesterday</span></article><article class="signal-card"><div class="signal-icon skin">◌</div><p>Skin response</p><strong>3.2 <small>μS tonic</small></strong><span class="signal-note"><span class="mini-line violet">⌁</span> EDA sample</span></article><article class="signal-card"><div class="signal-icon sleep">☾</div><p>Sleep</p><strong>7h 24m</strong><span class="signal-note">Last night</span></article></section>
       <section class="insight-card"><div class="insight-heading"><span class="sparkle">✳</span><div><p class="eyebrow">A PATTERN TO NOTICE</p><h2>Your activity & glucose</h2></div><span class="confidence">Good data</span></div><p class="insight-copy">In this sample, your glucose stayed fairly steady during a more active stretch this morning. Patterns can vary from day to day.</p><div class="insight-bottom"><span>⌚ &nbsp;9:10 – 10:35 AM</span><button id="detailsBtn">See details <span>→</span></button></div></section>
-      <aside class="awareness"><span class="shield">◈</span><p><strong>For awareness, not medical advice.</strong><br>This app does not diagnose or recommend treatment.</p><button aria-label="About this app">ⓘ</button></aside>
     </main>
-    <nav class="tabbar" aria-label="Main navigation"><a class="active" href="#home"><span>⌂</span>Today</a><a href="#signals"><span>◷</span>Signals</a><a href="#patterns"><span>✳</span>Patterns</a><a href="#settings"><span>⚙</span>Settings</a></nav>
-  </div><div class="toast" id="toast" role="status" aria-live="polite"></div><script src="app.js"></script>
+    <main class="app-screen" id="signalsScreen" hidden>
+      <section class="screen-heading"><p class="eyebrow">YOUR WEARABLES</p><h1>Signals</h1><p>Recent readings from each signal source.</p></section>
+      <section class="signal-grid"><article class="signal-card"><div class="signal-icon heart">♡</div><p>Heart rate</p><strong id="signalsHr">76 <small>bpm</small></strong><span class="signal-note">Recent average · sample data</span></article><article class="signal-card"><div class="signal-icon skin">◌</div><p>Skin response</p><strong id="signalsEda">3.2 <small>μS tonic</small></strong><span class="signal-note">EDA sample</span></article><article class="signal-card"><div class="signal-icon activity">↗</div><p>Movement</p><strong>4,820 <small>steps</small></strong><span class="signal-note">Sample data</span></article><article class="signal-card"><div class="signal-icon sleep">☾</div><p>Sleep</p><strong>7h 24m</strong><span class="signal-note">Last night · sample data</span></article></section>
+      <section class="detail-card"><p class="eyebrow">GLUCOSE</p><h2><span id="signalsGlucose">112</span> <small id="signalsUnit">mg/dL</small></h2><p>Latest sample reading: <span id="signalsAge">4 min ago</span>.</p><div class="mini-chart" aria-label="Illustrative glucose trend"><span></span><span></span><span></span><span></span><span></span><span></span><span></span><span></span><span></span><span></span><span></span><span></span></div></section>
+      <p class="screen-footnote">Signal values are illustrative sample data until real sensor connections are added.</p>
+    </main>
+    <main class="app-screen" id="patternsScreen" hidden>
+      <section class="screen-heading"><p class="eyebrow">OBSERVATIONS</p><h1>Patterns</h1><p>Context can help you notice how signals vary together.</p></section>
+      <article class="insight-card pattern-card"><div class="insight-heading"><span class="sparkle">✳</span><div><p class="eyebrow">A PATTERN TO NOTICE</p><h2>Your activity & glucose</h2></div><span class="confidence">Good data</span></div><p class="insight-copy">In this sample, your glucose stayed fairly steady during a more active stretch this morning. Patterns can vary from day to day.</p><div class="insight-bottom"><span>⌚ &nbsp;9:10 – 10:35 AM</span><span>Sample pattern</span></div></article>
+      <article class="detail-card"><p class="eyebrow">HOW TO READ THIS</p><h2>Association is not causation</h2><p>These observations describe sample signals. They do not explain why a change happened or predict what will happen next.</p></article>
+      <p class="screen-footnote">Insights are descriptive and awareness-only.</p>
+    </main>
+    <main class="app-screen" id="settingsScreen" hidden>
+      <section class="screen-heading"><p class="eyebrow">YOUR PREFERENCES</p><h1>Settings</h1><p>Choose how readings appear in this demo.</p></section>
+      <section class="settings-card"><div><strong>Glucose units</strong><p>Choose a display unit for glucose readings.</p></div><button class="unit-toggle" id="settingsUnitToggle">mg/dL <span>⌄</span></button></section>
+      <section class="settings-card"><div><strong>Data sources</strong><p>Simulated Python pipeline</p></div><span class="source-status"><i></i> Demo</span></section>
+      <section class="detail-card"><p class="eyebrow">PRIVACY</p><h2>Local prototype</h2><p>This demo uses simulated data. It has no account, sharing, or live device connection.</p></section>
+      <p class="screen-footnote">Your settings are not saved between sessions yet.</p>
+    </main>
+    <aside class="persistent-disclaimer" role="note" aria-label="Health information disclaimer"><span aria-hidden="true">◈</span><p id="disclaimerText">For awareness, not medical advice. This app does not diagnose, recommend treatment, or advise on insulin dosing. Talk to a healthcare professional about your health.</p></aside>
+    <nav class="tabbar" aria-label="Main navigation"><a class="active" href="#home" data-screen="home"><span>⌂</span>Today</a><a href="#signals" data-screen="signalsScreen"><span>◷</span>Signals</a><a href="#patterns" data-screen="patternsScreen"><span>✳</span>Patterns</a><a href="#settings" data-screen="settingsScreen"><span>⚙</span>Settings</a></nav>
+  </div><div class="toast" id="toast" role="status" aria-live="polite"></div><script src="app.js?v=2"></script>
 </body></html>
