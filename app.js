@@ -19,6 +19,8 @@ const svgNS = 'http://www.w3.org/2000/svg';
 const targetBand = document.querySelector('#targetBand');
 const chartY = value => ((chart.max - value) / (chart.max - chart.min)) * chart.height;
 targetBand.setAttribute('d', `M0 ${chartY(chart.high)} H${chart.width} V${chartY(chart.low)} H0Z`);
+let glucoseHistory = [];
+let demoSample = null;
 
 function updateUnits() {
   const label = mmol ? 'mmol/L' : 'mg/dL';
@@ -36,10 +38,18 @@ function updateUnits() {
 }
 
 function renderGlucoseHistory(history) {
-  if (!Array.isArray(history) || history.length < 2) return;
+  if (Array.isArray(history)) glucoseHistory = history;
+  const fallback = demoSample && glucoseHistory.length < 2
+    ? [
+        { t: demoSample.t - 5 * 3600, mgdl: 116, quality: 1 },
+        { t: demoSample.t + 23 * 60, mgdl: 112, quality: 1 }
+      ]
+    : glucoseHistory;
+  const source = demoSample ? [...fallback, demoSample].sort((a, b) => a.t - b.t) : glucoseHistory;
+  if (source.length < 2) return;
   const now = Date.now() / 1000;
   const span = chart.hours * 3600;
-  const samples = history
+  const samples = source
     .filter(sample => Number.isFinite(sample.t) && Number.isFinite(sample.mgdl) && sample.quality >= 0.5)
     .sort((a, b) => a.t - b.t);
   if (samples.length < 2) return;
@@ -79,7 +89,9 @@ function renderGlucoseHistory(history) {
     marker.setAttribute('class', `flag-marker ${flag}`);
     const time = new Date(point.sample.t * 1000).toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' });
     const title = document.createElementNS(svgNS, 'title');
-    title.textContent = `${flag === 'low' ? 'Low' : 'High'} glucose: ${Math.round(point.sample.mgdl)} mg/dL at ${time}`;
+    title.textContent = point.sample.demo
+      ? `Simulated ${flag} preview: ${Math.round(point.sample.mgdl)} mg/dL at ${time}. Not sensor data.`
+      : `${flag === 'low' ? 'Low' : 'High'} glucose: ${Math.round(point.sample.mgdl)} mg/dL at ${time}`;
     marker.append(title);
     flags.append(marker);
 
@@ -97,14 +109,40 @@ function renderGlucoseHistory(history) {
   const summary = highCount || lowCount
     ? `${highCount} high and ${lowCount} low readings in the displayed window.`
     : 'No displayed readings below 70 or above 180 mg/dL.';
-  document.querySelector('#flagSummary').textContent = summary;
+  document.querySelector('#flagSummary').textContent = demoSample ? `${summary} Includes a simulated preview only; it is not sensor data and is not saved.` : summary;
   document.querySelector('.chart').setAttribute(
     'aria-label', `Six-hour glucose trend. ${summary} Readings below 70 mg/dL are marked Low; readings above 180 mg/dL are marked High.`
   );
 }
 
+function previewFlag(level) {
+  demoSample = {
+    t: Date.now() / 1000 - 23 * 60,
+    mgdl: level === 'low' ? 65 : 190,
+    quality: 1,
+    demo: true
+  };
+  document.querySelector('#previewNote').hidden = false;
+  document.querySelector('#clearPreview').hidden = false;
+  document.querySelector('#previewLow').setAttribute('aria-pressed', String(level === 'low'));
+  document.querySelector('#previewHigh').setAttribute('aria-pressed', String(level === 'high'));
+  renderGlucoseHistory();
+}
+
+function clearPreview() {
+  demoSample = null;
+  document.querySelector('#previewNote').hidden = true;
+  document.querySelector('#clearPreview').hidden = true;
+  document.querySelector('#previewLow').setAttribute('aria-pressed', 'false');
+  document.querySelector('#previewHigh').setAttribute('aria-pressed', 'false');
+  renderGlucoseHistory();
+}
+
 unitToggle.addEventListener('click', () => { mmol = !mmol; updateUnits(); });
 document.querySelector('#settingsUnitToggle').addEventListener('click', () => { mmol = !mmol; updateUnits(); });
+document.querySelector('#previewLow').addEventListener('click', () => previewFlag('low'));
+document.querySelector('#previewHigh').addEventListener('click', () => previewFlag('high'));
+document.querySelector('#clearPreview').addEventListener('click', clearPreview);
 
 const toast = document.querySelector('#toast');
 let timer;
