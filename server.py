@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import json
+import argparse
 import time
 from http.server import SimpleHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
@@ -10,7 +11,7 @@ import sensor_integration as si
 
 ROOT = Path(__file__).resolve().parent
 DB = ROOT / "wearables_demo.db"
-start = time.time() - 2 * 3600
+start = time.time() - 6 * 3600
 buffer = si.SampleBuffer(str(DB))
 pipeline = si.IntegrationPipeline(buffer)
 pipeline.register(si.SimulatedSource("cgm", 300, 112, 17, 2.5, start, seed=12))
@@ -37,13 +38,17 @@ class Handler(SimpleHTTPRequestHandler):
             "as_of": now,
             "glucose_mgdl": window.glucose_last_mgdl,
             "glucose_age_seconds": window.glucose_age_s(),
+            "glucose_history": [
+                {"t": sample.t, "mgdl": sample.value, "quality": sample.quality}
+                for sample in buffer.query("cgm", now - 6 * 3600, now + 1)
+            ],
             "heart_rate_bpm": window.features.get("hr_mean"),
             "eda_tonic_us": window.features.get("eda_tonic_mean"),
             "skin_responses_per_minute": window.features.get("scr_per_min"),
             "confidence": window.confidence,
             "status": window.status,
             "description": si.describe(window),
-            "awareness_note": si.AWARENESS_NOTE,
+            "disclaimer": si.DISCLAIMER,
         }
         body = json.dumps(payload).encode("utf-8")
         self.send_response(200)
@@ -55,6 +60,10 @@ class Handler(SimpleHTTPRequestHandler):
 
 
 if __name__ == "__main__":
-    print("Wearables demo running at http://localhost:8000")
+    parser = argparse.ArgumentParser(description="Run the Wearables mobile app demo server.")
+    parser.add_argument("port", nargs="?", type=int, default=8000,
+                        help="port to serve on (default: 8000)")
+    args = parser.parse_args()
+    print(f"Wearables demo running at http://localhost:{args.port}")
     print("This demo uses simulated samples; no real health-device data is connected.")
-    ThreadingHTTPServer(("0.0.0.0", 8000), Handler).serve_forever()
+    ThreadingHTTPServer(("0.0.0.0", args.port), Handler).serve_forever()

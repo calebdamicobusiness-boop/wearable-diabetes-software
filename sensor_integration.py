@@ -26,7 +26,11 @@ from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
 from typing import Iterable, Optional
 
-AWARENESS_NOTE = "For awareness only. Not medical advice; do not use for insulin dosing."
+DISCLAIMER = (
+    "For awareness, not medical advice. This app does not diagnose, recommend treatment, "
+    "or advise on insulin dosing. Talk to a healthcare professional about your health."
+)
+AWARENESS_NOTE = DISCLAIMER  # Backward-compatible alias used by existing insight functions.
 
 # Tunable starting values (confirm with advisors)
 BIN_S = 300                 # 5-min common time base
