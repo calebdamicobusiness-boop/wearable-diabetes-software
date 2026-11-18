@@ -3,13 +3,21 @@ from __future__ import annotations
 
 import json
 import argparse
+import sys
 import time
 from http.server import SimpleHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
+from datetime import timezone
 
 import sensor_integration as si
 
 ROOT = Path(__file__).resolve().parent
+sys.path.insert(0, str(ROOT / "src"))
+from wearables.ingest.dexcom_backend import DexcomBackend, DexcomError
+from wearables.ingest.dexcom_g6 import DexcomG6Source
+from wearables.ingest.dexcom_g7 import DexcomG7Source
+from wearables.pipeline import run as run_wearable_pipeline
+
 DB = ROOT / "wearables_demo.db"
 start = time.time() - 6 * 3600
 buffer = si.SampleBuffer(str(DB))
@@ -18,6 +26,8 @@ pipeline.register(si.SimulatedSource("cgm", 300, 112, 17, 2.5, start, seed=12))
 pipeline.register(si.SimulatedSource("hr", 30, 76, 9, 3.0, start, seed=24))
 pipeline.register(si.SimulatedEDASource("eda", start_t=start, seed=36))
 pipeline.poll()
+dexcom_source = None
+dexcom_mode = None
 
 
 class Handler(SimpleHTTPRequestHandler):
@@ -31,6 +41,9 @@ class Handler(SimpleHTTPRequestHandler):
         super().do_GET()
 
     def send_summary(self):
+        if dexcom_source is not None:
+            self.send_dexcom_summary()
+            return
         now = time.time()
         window = pipeline.latest({"glucose": "cgm", "hr": "hr", "eda": "eda"}, now)
         payload = {
@@ -51,7 +64,60 @@ class Handler(SimpleHTTPRequestHandler):
             "disclaimer": si.DISCLAIMER,
         }
         body = json.dumps(payload).encode("utf-8")
-        self.send_response(200)
+        self.send_json(200, body)
+
+    def send_dexcom_summary(self):
+        now = time.time()
+        try:
+            readings, insights = run_wearable_pipeline(dexcom_source)
+        except DexcomError as exc:
+            self.send_json(502, {
+                "mode": dexcom_mode,
+                "source_label": f"Dexcom {dexcom_mode.removeprefix('dexcom_').upper()}",
+                "error": str(exc),
+                "glucose_mgdl": None,
+                "glucose_history": [],
+                "insights": [],
+                "disclaimer": si.DISCLAIMER,
+            })
+            return
+
+        glucose_readings = [reading for reading in readings if reading.glucose_mgdl is not None]
+        latest = glucose_readings[-1] if glucose_readings else None
+        latest_t = (latest.timestamp.replace(tzinfo=timezone.utc).timestamp() if latest else now)
+        # The PWA graph spans six hours. Sandbox history may be old, so anchor this
+        # window to the newest returned reading instead of wall-clock time.
+        cutoff = latest_t - 6 * 3600
+        history = [
+            {"t": reading.timestamp.replace(tzinfo=timezone.utc).timestamp(),
+             "mgdl": reading.glucose_mgdl}
+            for reading in glucose_readings
+            if cutoff <= reading.timestamp.replace(tzinfo=timezone.utc).timestamp() <= latest_t
+        ]
+        insight_payload = [
+            {"timestamp": item.timestamp.replace(tzinfo=timezone.utc).timestamp(),
+             "kind": item.kind, "message": item.message}
+            for item in insights
+        ]
+        payload = {
+            "mode": dexcom_mode,
+            "source_label": f"Dexcom {dexcom_mode.removeprefix('dexcom_').upper()}",
+            "as_of": now,
+            "chart_end_t": latest_t,
+            "glucose_mgdl": latest.glucose_mgdl if latest else None,
+            "glucose_age_seconds": max(0.0, now - latest_t) if latest else None,
+            "glucose_history": history,
+            "insights": insight_payload,
+            "heart_rate_bpm": None,
+            "eda_tonic_us": None,
+            "status": "ok" if latest else "no_data",
+            "disclaimer": si.DISCLAIMER,
+        }
+        self.send_json(200, payload)
+
+    def send_json(self, status, payload):
+        body = payload if isinstance(payload, bytes) else json.dumps(payload).encode("utf-8")
+        self.send_response(status)
         self.send_header("Content-Type", "application/json; charset=utf-8")
         self.send_header("Cache-Control", "no-store")
         self.send_header("Content-Length", str(len(body)))
@@ -63,7 +129,23 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Run the Wearables mobile app demo server.")
     parser.add_argument("port", nargs="?", type=int, default=8000,
                         help="port to serve on (default: 8000)")
+    parser.add_argument("--dexcom", choices=("g6", "g7"),
+                        help="connect the dashboard to the selected Dexcom adapter instead of simulated glucose")
     args = parser.parse_args()
+    if args.dexcom:
+        backend = DexcomBackend.from_env()
+        print(f"Opening Dexcom sandbox authorization for {args.dexcom.upper()}...")
+        backend.login()
+        source_class = DexcomG6Source if args.dexcom == "g6" else DexcomG7Source
+        dexcom_source = source_class(backend, history_days=7, use_data_range=True)
+        dexcom_mode = f"dexcom_{args.dexcom}"
     print(f"Wearables demo running at http://localhost:{args.port}")
-    print("This demo uses simulated samples; no real health-device data is connected.")
-    ThreadingHTTPServer(("0.0.0.0", args.port), Handler).serve_forever()
+    if dexcom_source is None:
+        print("This demo uses simulated samples; no real health-device data is connected.")
+    else:
+        print(f"Dashboard is using the explicit Dexcom {args.dexcom.upper()} adapter.")
+    # The dashboard API has no user authentication. Keep real health data bound to
+    # this computer; the simulated demo retains its existing LAN-accessible behavior.
+    host = "127.0.0.1" if dexcom_source is not None else "0.0.0.0"
+    print(f"Binding dashboard to {host} for {'Dexcom data' if dexcom_source else 'simulated demo data'}.")
+    ThreadingHTTPServer((host, args.port), Handler).serve_forever()

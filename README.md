@@ -11,7 +11,7 @@ Install Python 3.10+, run `python server.py` from this folder, and open `http://
 - Daily glucose trend, heart rate, movement, EDA and sleep overview.
 - Glucose display toggle between mg/dL and mmol/L.
 - Responsive phone layout, accessible control labels, and offline app shell.
-- Simulated sample data only, provided by the repository's Python module. No sensor permissions, real CGM connection, accounts, cloud sync or medical recommendations.
+- Simulated sample data by default. An opt-in local Dexcom G6/G7 mode is available for sandbox validation; no medical recommendations are provided.
 
 ## Dexcom G6/G7 integration
 
@@ -41,3 +41,18 @@ Dexcom status/trend and a quality score are not represented by the existing `wea
 The backend automatically refreshes near-expiry access tokens and retries a 401 at most once. It keeps the current refresh token and expiry in memory for the life of the backend instance; process restart requires a new OAuth login because token persistence is not configured. The legacy top-level `sensor_integration.py` and its SQLite integration remain unchanged.
 
 Run offline tests (mocked API responses; no credentials or network access): `PYTHONPATH=src python -m unittest discover -s tests -v`. Health data should remain local until the project's encryption and sharing requirements are implemented.
+
+### Show Dexcom data in the dashboard
+
+From the repository root in PowerShell, with the required Dexcom sandbox values configured in `.env`, start the dashboard in the selected device mode:
+
+```powershell
+$env:PYTHONPATH = "src"
+.\.venv\Scripts\python.exe server.py --dexcom g6
+```
+
+For G7, run `.\.venv\Scripts\python.exe server.py --dexcom g7` instead. The server opens the OAuth browser flow before it starts listening; select the corresponding **Sandbox User - G6** or **Sandbox User - G7** account. The configured `DEXCOM_REDIRECT_URI` must match the registered callback and the server port (default `8000`). Then open `http://localhost:8000`.
+
+In Dexcom mode, `/api/summary` reads through the selected device adapter, calls the shared `wearables.pipeline.run()` processing and analytics path, and returns normalized glucose history and generated insights to the PWA. Sandbox history is requested relative to Dexcom's `dataRange` endpoint, so older canned readings can still populate the chart. Connection or model-metadata errors are shown as unavailable; the dashboard does not silently substitute simulated glucose. Because the dashboard API has no user authentication, Dexcom mode binds to `127.0.0.1` and is available only on the computer running the server. Other signals are marked not connected.
+
+The default `python server.py` mode remains the existing simulated dashboard and retains its LAN binding. Dexcom tokens are held in process memory, so restart the OAuth flow after restarting the server.

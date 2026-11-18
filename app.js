@@ -21,6 +21,7 @@ const chartY = value => ((chart.max - value) / (chart.max - chart.min)) * chart.
 targetBand.setAttribute('d', `M0 ${chartY(chart.high)} H${chart.width} V${chartY(chart.low)} H0Z`);
 let glucoseHistory = [];
 let demoSample = null;
+let glucoseChartEnd = null;
 
 function updateUnits() {
   const label = mmol ? 'mmol/L' : 'mg/dL';
@@ -29,7 +30,7 @@ function updateUnits() {
   document.querySelector('#unit').textContent = label;
   document.querySelector('#signalsUnit').textContent = label;
   const value = window.latestGlucose;
-  const display = mmol ? (value / 18.016).toFixed(1) : Math.round(value);
+  const display = Number.isFinite(value) ? (mmol ? (value / 18.016).toFixed(1) : Math.round(value)) : '—';
   document.querySelector('#glucose').textContent = display;
   document.querySelector('#signalsGlucose').textContent = display;
   document.querySelector('#rangeLegend').innerHTML = mmol
@@ -37,8 +38,9 @@ function updateUnits() {
     : 'Low &lt;70 mg/dL <span>·</span> High &gt;180 mg/dL';
 }
 
-function renderGlucoseHistory(history) {
+function renderGlucoseHistory(history, chartEnd) {
   if (Array.isArray(history)) glucoseHistory = history;
+  if (Number.isFinite(chartEnd)) glucoseChartEnd = chartEnd;
   const fallback = demoSample && glucoseHistory.length < 2
     ? [
         { t: demoSample.t - 5 * 3600, mgdl: 116, quality: 1 },
@@ -46,13 +48,27 @@ function renderGlucoseHistory(history) {
       ]
     : glucoseHistory;
   const source = demoSample ? [...fallback, demoSample].sort((a, b) => a.t - b.t) : glucoseHistory;
-  if (source.length < 2) return;
-  const now = Date.now() / 1000;
+  const now = glucoseChartEnd ?? Date.now() / 1000;
   const span = chart.hours * 3600;
   const samples = source
-    .filter(sample => Number.isFinite(sample.t) && Number.isFinite(sample.mgdl) && sample.quality >= 0.5)
+    .filter(sample => Number.isFinite(sample.t) && Number.isFinite(sample.mgdl)
+      && (sample.quality == null || sample.quality >= 0.5)
+      && sample.t >= now - span && sample.t <= now)
     .sort((a, b) => a.t - b.t);
-  if (samples.length < 2) return;
+  if (samples.length < 2) {
+    document.querySelector('#glucoseLine').setAttribute('d', '');
+    document.querySelector('#glucoseArea').setAttribute('d', '');
+    document.querySelector('#latestDot').setAttribute('visibility', 'hidden');
+    document.querySelector('#glucoseFlags').replaceChildren();
+    document.querySelector('#flagSummary').textContent = 'Not enough readings to draw a glucose trend.';
+    return;
+  }
+
+  const axisLabels = document.querySelectorAll('.chart-times span');
+  [6, 4.5, 3, 1.5, 0].forEach((hoursAgo, index) => {
+    const labelTime = new Date((now - hoursAgo * 3600) * 1000);
+    axisLabels[index].textContent = index === 4 ? 'LATEST' : labelTime.toLocaleTimeString([], { hour: 'numeric' });
+  });
 
   const points = samples.map(sample => ({
     sample,
@@ -65,6 +81,7 @@ function renderGlucoseHistory(history) {
     'd', `${line} L${points.at(-1).x.toFixed(1)} ${chart.height} L${points[0].x.toFixed(1)} ${chart.height} Z`
   );
   const latest = points.at(-1);
+  document.querySelector('#latestDot').setAttribute('visibility', 'visible');
   document.querySelector('#latestDot').setAttribute('cx', latest.x.toFixed(1));
   document.querySelector('#latestDot').setAttribute('cy', latest.y.toFixed(1));
 
@@ -153,7 +170,7 @@ function showToast(message) {
   timer = setTimeout(() => toast.classList.remove('show'), 2300);
 }
 
-document.querySelector('#detailsBtn').addEventListener('click', () => showToast('Showing a sample activity and glucose pattern.'));
+document.querySelector('#detailsBtn').addEventListener('click', () => showToast('Insights are descriptive observations from available pipeline data.'));
 function showScreen(id) {
   document.querySelectorAll('main').forEach(screen => { screen.hidden = screen.id !== id; });
   document.querySelectorAll('.tabbar a').forEach(link => link.classList.toggle('active', link.dataset.screen === id));
@@ -171,21 +188,95 @@ if ('serviceWorker' in navigator) {
 
 updateUnits();
 fetch('./api/summary', { cache: 'no-store' })
-  .then(response => response.ok ? response.json() : Promise.reject())
+  .then(async response => {
+    const data = await response.json();
+    if (!response.ok) {
+      const error = new Error(data.error || 'Dashboard data could not be loaded.');
+      error.mode = data.mode;
+      error.sourceLabel = data.source_label;
+      throw error;
+    }
+    return data;
+  })
   .then(data => {
     if (data.disclaimer) document.querySelector('#disclaimerText').textContent = data.disclaimer;
-    renderGlucoseHistory(data.glucose_history);
+    renderGlucoseHistory(data.glucose_history, data.chart_end_t);
+    const isDexcom = typeof data.mode === 'string' && data.mode.startsWith('dexcom_');
+    if (isDexcom) {
+      const label = data.source_label || 'Dexcom';
+      document.querySelector('.live').textContent = `${label} · API`;
+      document.querySelector('#trendLabel').textContent = 'Trend unavailable';
+      ['#homeHr', '#homeMovement', '#homeEda', '#homeSleep', '#signalsHr', '#signalsMovement', '#signalsEda', '#signalsSleep']
+        .forEach(selector => { const node = document.querySelector(selector); if (node) node.textContent = '—'; });
+      document.querySelectorAll('.dexcom-unavailable-note').forEach(node => { node.textContent = 'Not connected'; });
+      document.querySelector('#signalsFootnote').textContent = 'Dexcom connection supplies glucose only; other signals are not connected.';
+      document.querySelector('#signalsMiniChart').hidden = true;
+      document.querySelector('#previewControls').hidden = true;
+
+      const insights = Array.isArray(data.insights) ? data.insights : [];
+      const insightText = insights.length
+        ? insights.slice(-3).map(item => item.message).join(' ')
+        : (data.glucose_mgdl == null
+          ? 'No glucose readings are available from this Dexcom account.'
+          : 'No analytics insight was generated for the available glucose window.');
+      ['#homeInsightCopy', '#patternInsightCopy'].forEach(selector => {
+        document.querySelector(selector).textContent = insightText;
+      });
+      const insightLabel = insights.length ? `${insights.length} pipeline insight${insights.length === 1 ? '' : 's'}` : 'No insight';
+      ['#homeInsightStatus', '#patternInsightStatus'].forEach(selector => {
+        document.querySelector(selector).textContent = insightLabel;
+      });
+      const latestInsight = insights.at(-1);
+      const insightTime = latestInsight
+        ? new Date(latestInsight.timestamp * 1000).toLocaleString([], { dateStyle: 'medium', timeStyle: 'short' })
+        : 'Shared glucose analytics';
+      ['#homeInsightTime', '#patternInsightTime'].forEach(selector => {
+        document.querySelector(selector).textContent = insightTime;
+      });
+    } else {
+      document.querySelector('.live').textContent = 'Simulated · Python pipeline';
+    }
     if (data.glucose_mgdl !== null && data.glucose_mgdl !== undefined) {
       window.latestGlucose = data.glucose_mgdl;
       updateUnits();
       const age = Math.max(0, Math.round(data.glucose_age_seconds / 60));
       document.querySelector('.card-foot b').textContent = `${age} min ago`;
       document.querySelector('#signalsAge').textContent = `${age} min ago`;
-      document.querySelector('.live').innerHTML = '<i></i> Simulated · Python pipeline';
-      document.querySelector('#home .signal-grid .signal-card:nth-child(1) strong').innerHTML = `${Math.round(data.heart_rate_bpm)} <small>bpm</small>`;
-      document.querySelector('#home .signal-grid .signal-card:nth-child(3) strong').innerHTML = `${Number(data.eda_tonic_us).toFixed(1)} <small>μS tonic</small>`;
-      document.querySelector('#signalsHr').innerHTML = `${Math.round(data.heart_rate_bpm)} <small>bpm</small>`;
-      document.querySelector('#signalsEda').innerHTML = `${Number(data.eda_tonic_us).toFixed(1)} <small>μS tonic</small>`;
+      if (!isDexcom) {
+        document.querySelector('#homeHr').innerHTML = `${Math.round(data.heart_rate_bpm)} <small>bpm</small>`;
+        document.querySelector('#homeEda').innerHTML = `${Number(data.eda_tonic_us).toFixed(1)} <small>μS tonic</small>`;
+        document.querySelector('#signalsHr').innerHTML = `${Math.round(data.heart_rate_bpm)} <small>bpm</small>`;
+        document.querySelector('#signalsEda').innerHTML = `${Number(data.eda_tonic_us).toFixed(1)} <small>μS tonic</small>`;
+      }
+    } else if (isDexcom) {
+      window.latestGlucose = null;
+      updateUnits();
+      document.querySelector('.card-foot b').textContent = 'No reading';
+      document.querySelector('#signalsAge').textContent = 'No reading available';
     }
   })
-  .catch(() => {});
+  .catch(error => {
+    window.latestGlucose = null;
+    updateUnits();
+    document.querySelector('.live').textContent = 'Data unavailable';
+    document.querySelector('.card-foot b').textContent = 'Unavailable';
+    document.querySelector('#signalsAge').textContent = 'Unavailable';
+    ['#homeInsightCopy', '#patternInsightCopy'].forEach(selector => {
+      const node = document.querySelector(selector);
+      if (node) node.textContent = error.message || 'Dashboard data could not be loaded.';
+    });
+    if (typeof error.mode === 'string' && error.mode.startsWith('dexcom_')) {
+      document.querySelector('.live').textContent = `${error.sourceLabel || 'Dexcom'} unavailable`;
+      document.querySelector('#trendLabel').textContent = 'Trend unavailable';
+      ['#homeHr', '#homeMovement', '#homeEda', '#homeSleep', '#signalsHr', '#signalsMovement', '#signalsEda', '#signalsSleep']
+        .forEach(selector => { const node = document.querySelector(selector); if (node) node.textContent = '—'; });
+      document.querySelectorAll('.dexcom-unavailable-note').forEach(node => { node.textContent = 'Not connected'; });
+      document.querySelector('#signalsFootnote').textContent = 'Dexcom connection supplies glucose only; other signals are not connected.';
+      document.querySelector('#signalsMiniChart').hidden = true;
+      document.querySelector('#previewControls').hidden = true;
+      ['#homeInsightStatus', '#patternInsightStatus'].forEach(selector => {
+        document.querySelector(selector).textContent = 'Data unavailable';
+      });
+    }
+    renderGlucoseHistory([], null);
+  });
