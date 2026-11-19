@@ -3,7 +3,7 @@
 <head>
   <meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
   <meta name="theme-color" content="#101b2b"><meta name="apple-mobile-web-app-capable" content="yes"><meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
-  <meta name="description" content="Wearables glucose and activity awareness dashboard"><link rel="manifest" href="manifest.webmanifest"><link rel="apple-touch-icon" href="icon.svg"><link rel="stylesheet" href="styles.css?v=4"><title>Wearables · Daily overview</title>
+  <meta name="description" content="Wearables glucose and activity awareness dashboard"><link rel="manifest" href="manifest.webmanifest"><link rel="apple-touch-icon" href="icon.svg"><link rel="stylesheet" href="styles.css?v=5"><title>Wearables · Daily overview</title>
 </head>
 <body>
   <div class="app-shell">
@@ -21,11 +21,15 @@
       <section class="detail-card"><p class="eyebrow">GLUCOSE</p><h2><span id="signalsGlucose">112</span> <small id="signalsUnit">mg/dL</small></h2><p>Latest sample reading: <span id="signalsAge">4 min ago</span>.</p><div class="mini-chart" id="signalsMiniChart" aria-label="Illustrative glucose trend"><span></span><span></span><span></span><span></span><span></span><span></span><span></span><span></span><span></span><span></span><span></span><span></span></div></section>
       <p class="screen-footnote" id="signalsFootnote">Signal values are illustrative sample data until real sensor connections are added.</p>
     </main>
-    <main class="app-screen" id="patternsScreen" hidden>
-      <section class="screen-heading"><p class="eyebrow">OBSERVATIONS</p><h1>Patterns</h1><p>Context can help you notice how signals vary together.</p></section>
-      <article class="insight-card pattern-card"><div class="insight-heading"><span class="sparkle">✳</span><div><p class="eyebrow">A PATTERN TO NOTICE</p><h2>Glucose trend insight</h2></div><span class="confidence" id="patternInsightStatus">Good data</span></div><p class="insight-copy" id="patternInsightCopy">In this sample, your glucose stayed fairly steady during a more active stretch this morning. Patterns can vary from day to day.</p><div class="insight-bottom"><span id="patternInsightTime">⌚ &nbsp;9:10 – 10:35 AM</span><span>Sample pattern</span></div></article>
-      <article class="detail-card"><p class="eyebrow">HOW TO READ THIS</p><h2>Association is not causation</h2><p>These observations describe sample signals. They do not explain why a change happened or predict what will happen next.</p></article>
-      <p class="screen-footnote">Insights are descriptive and awareness-only.</p>
+    <main class="app-screen patterns-screen" id="patternsScreen" hidden>
+      <section class="screen-heading patterns-header"><p class="eyebrow">OBSERVATIONS</p><h1>Patterns</h1><p>Recent glucose changes, newest first.</p><p class="pattern-count" id="patternCount" aria-live="polite">Loading patterns…</p></section>
+      <ol class="pattern-list" id="patternList" aria-label="Glucose pattern events"></ol>
+      <p class="screen-footnote">Pattern labels describe readings and trends. They are not treatment guidance.</p>
+    </main>
+    <main class="app-screen insights-screen" id="insightsScreen" hidden>
+      <section class="screen-heading"><p class="eyebrow">ANALYTICS</p><h1>Insights</h1><p>Summaries appear when the available data supports them.</p></section>
+      <div class="insight-list" id="insightList" aria-live="polite"></div>
+      <p class="screen-footnote">Insights are descriptive and awareness-only. Longer-term summaries require enough readings across multiple dates.</p>
     </main>
     <main class="app-screen" id="settingsScreen" hidden>
       <section class="screen-heading"><p class="eyebrow">YOUR PREFERENCES</p><h1>Settings</h1><p>Choose how readings appear in this demo.</p></section>
@@ -35,6 +39,6 @@
       <p class="screen-footnote">Your settings are not saved between sessions yet.</p>
     </main>
     <aside class="persistent-disclaimer" role="note" aria-label="Health information disclaimer"><span aria-hidden="true">◈</span><p id="disclaimerText">For awareness, not medical advice. This app does not diagnose, recommend treatment, or advise on insulin dosing. Talk to a healthcare professional about your health.</p></aside>
-    <nav class="tabbar" aria-label="Main navigation"><a class="active" href="#home" data-screen="home"><span>⌂</span>Today</a><a href="#signals" data-screen="signalsScreen"><span>◷</span>Signals</a><a href="#patterns" data-screen="patternsScreen"><span>✳</span>Patterns</a><a href="#settings" data-screen="settingsScreen"><span>⚙</span>Settings</a></nav>
-  </div><div class="toast" id="toast" role="status" aria-live="polite"></div><script src="app.js?v=5"></script>
+    <nav class="tabbar" aria-label="Main navigation"><a class="active" href="#home" data-screen="home"><span>⌂</span>Today</a><a href="#signals" data-screen="signalsScreen"><span>◷</span>Signals</a><a href="#patterns" data-screen="patternsScreen"><span>✳</span>Patterns</a><a href="#insights" data-screen="insightsScreen"><span>✦</span>Insights</a><a href="#settings" data-screen="settingsScreen"><span>⚙</span>Settings</a></nav>
+  </div><div class="toast" id="toast" role="status" aria-live="polite"></div><script src="app.js?v=6"></script>
 </body></html>

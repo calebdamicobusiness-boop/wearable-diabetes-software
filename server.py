@@ -7,7 +7,7 @@ import sys
 import time
 from http.server import SimpleHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
-from datetime import timezone
+from datetime import datetime, timezone
 
 import sensor_integration as si
 
@@ -17,6 +17,9 @@ from wearables.ingest.dexcom_backend import DexcomBackend, DexcomError
 from wearables.ingest.dexcom_g6 import DexcomG6Source
 from wearables.ingest.dexcom_g7 import DexcomG7Source
 from wearables.pipeline import run as run_wearable_pipeline
+from wearables import config as wearable_config
+from wearables.analytics.dashboard import generate_dashboard_insights, generate_pattern_entries
+from wearables.models import Sample as WearableSample
 
 DB = ROOT / "wearables_demo.db"
 start = time.time() - 6 * 3600
@@ -28,6 +31,20 @@ pipeline.register(si.SimulatedEDASource("eda", start_t=start, seed=36))
 pipeline.poll()
 dexcom_source = None
 dexcom_mode = None
+
+
+class SampleSnapshot:
+    """Adapt one fetched batch to the existing pipeline without making another API call."""
+    def __init__(self, samples):
+        self._samples = samples
+
+    def samples(self):
+        return iter(self._samples)
+
+
+def _summary_analytics(samples, metadata):
+    readings, events = run_wearable_pipeline(SampleSnapshot(samples))
+    return readings, generate_dashboard_insights(readings, events), generate_pattern_entries(readings, metadata)
 
 
 class Handler(SimpleHTTPRequestHandler):
@@ -63,13 +80,26 @@ class Handler(SimpleHTTPRequestHandler):
             "description": si.describe(window),
             "disclaimer": si.DISCLAIMER,
         }
+        simulated_samples = buffer.query("cgm", now - 7 * 24 * 3600, now + 1)
+        wearable_samples = [
+            WearableSample(datetime.fromtimestamp(sample.t, timezone.utc).replace(tzinfo=None),
+                           wearable_config.GLUCOSE, sample.value)
+            for sample in simulated_samples
+        ]
+        sim_metadata = [
+            {"timestamp_original": datetime.fromtimestamp(sample.t, timezone.utc).isoformat().replace("+00:00", "Z"),
+             "timestamp_epoch": sample.t, "mgdl": sample.value}
+            for sample in simulated_samples
+        ]
+        _, payload["insights"], payload["patterns"] = _summary_analytics(wearable_samples, sim_metadata)
         body = json.dumps(payload).encode("utf-8")
         self.send_json(200, body)
 
     def send_dexcom_summary(self):
         now = time.time()
         try:
-            readings, insights = run_wearable_pipeline(dexcom_source)
+            samples = list(dexcom_source.samples())
+            readings, insights, patterns = _summary_analytics(samples, dexcom_source.reading_metadata)
         except DexcomError as exc:
             self.send_json(502, {
                 "mode": dexcom_mode,
@@ -78,36 +108,33 @@ class Handler(SimpleHTTPRequestHandler):
                 "glucose_mgdl": None,
                 "glucose_history": [],
                 "insights": [],
+                "patterns": [],
                 "disclaimer": si.DISCLAIMER,
             })
             return
 
         glucose_readings = [reading for reading in readings if reading.glucose_mgdl is not None]
         latest = glucose_readings[-1] if glucose_readings else None
-        latest_t = (latest.timestamp.replace(tzinfo=timezone.utc).timestamp() if latest else now)
+        records = dexcom_source.reading_metadata
+        latest_record = records[-1] if records else None
+        latest_t = latest_record["timestamp_epoch"] if latest_record else now
         # The PWA graph spans six hours. Sandbox history may be old, so anchor this
         # window to the newest returned reading instead of wall-clock time.
         cutoff = latest_t - 6 * 3600
         history = [
-            {"t": reading.timestamp.replace(tzinfo=timezone.utc).timestamp(),
-             "mgdl": reading.glucose_mgdl}
-            for reading in glucose_readings
-            if cutoff <= reading.timestamp.replace(tzinfo=timezone.utc).timestamp() <= latest_t
-        ]
-        insight_payload = [
-            {"timestamp": item.timestamp.replace(tzinfo=timezone.utc).timestamp(),
-             "kind": item.kind, "message": item.message}
-            for item in insights
+            {"t": record["timestamp_epoch"], "mgdl": record["mgdl"]}
+            for record in records if cutoff <= record["timestamp_epoch"] <= latest_t
         ]
         payload = {
             "mode": dexcom_mode,
             "source_label": f"Dexcom {dexcom_mode.removeprefix('dexcom_').upper()}",
             "as_of": now,
             "chart_end_t": latest_t,
-            "glucose_mgdl": latest.glucose_mgdl if latest else None,
+            "glucose_mgdl": latest_record["mgdl"] if latest_record else None,
             "glucose_age_seconds": max(0.0, now - latest_t) if latest else None,
             "glucose_history": history,
-            "insights": insight_payload,
+            "insights": insights,
+            "patterns": patterns,
             "heart_rate_bpm": None,
             "eda_tonic_us": None,
             "status": "ok" if latest else "no_data",

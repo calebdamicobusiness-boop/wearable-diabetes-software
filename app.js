@@ -170,7 +170,98 @@ function showToast(message) {
   timer = setTimeout(() => toast.classList.remove('show'), 2300);
 }
 
-document.querySelector('#detailsBtn').addEventListener('click', () => showToast('Insights are descriptive observations from available pipeline data.'));
+function renderPatternList(patterns) {
+  const list = document.querySelector('#patternList');
+  const count = document.querySelector('#patternCount');
+  list.replaceChildren();
+  const sorted = Array.isArray(patterns)
+    ? [...patterns].filter(item => Number.isFinite(item.timestamp)).sort((a, b) => b.timestamp - a.timestamp)
+    : [];
+  count.textContent = `${sorted.length} observed pattern${sorted.length === 1 ? '' : 's'}`;
+  if (!sorted.length) {
+    const empty = document.createElement('li');
+    empty.className = 'pattern-empty';
+    empty.textContent = 'No classifiable glucose patterns are available in this data window.';
+    list.append(empty);
+    return;
+  }
+
+  for (const item of sorted) {
+    const entry = document.createElement('li');
+    entry.className = 'pattern-row';
+    const content = document.createElement('div');
+    const description = document.createElement('p');
+    description.className = 'pattern-description';
+    description.textContent = item.description;
+    const glucose = document.createElement('div');
+    glucose.className = 'pattern-reading';
+    const mgdl = Number(item.mgdl);
+    glucose.textContent = Number.isFinite(mgdl)
+      ? `${mmol ? (mgdl / 18.016).toFixed(1) : Math.round(mgdl)} ${mmol ? 'mmol/L' : 'mg/dL'}`
+      : 'Reading unavailable';
+    content.append(description, glucose);
+
+    const meta = document.createElement('div');
+    meta.className = 'pattern-meta';
+    const status = document.createElement('span');
+    const label = String(item.status || 'Observed');
+    status.className = `pattern-status ${label.toLowerCase()}`;
+    status.textContent = label;
+    const sourceTime = item.timestamp_original || new Date(item.timestamp * 1000).toISOString();
+    const instant = new Date(sourceTime);
+    const time = document.createElement('time');
+    time.dateTime = sourceTime;
+    if (Number.isNaN(instant.getTime())) {
+      time.textContent = sourceTime;
+    } else {
+      const date = document.createElement('span');
+      date.textContent = instant.toLocaleDateString([], { month: 'short', day: 'numeric', year: 'numeric' });
+      const clock = document.createElement('span');
+      clock.textContent = instant.toLocaleTimeString([], { hour: 'numeric', minute: '2-digit', second: '2-digit' });
+      time.append(date, clock);
+    }
+    meta.append(status, time);
+    entry.append(content, meta);
+    list.append(entry);
+  }
+}
+
+function renderInsightList(insights) {
+  const list = document.querySelector('#insightList');
+  list.replaceChildren();
+  const entries = Array.isArray(insights) ? insights : [];
+  if (!entries.length) {
+    const empty = document.createElement('p');
+    empty.className = 'pattern-empty';
+    empty.textContent = 'No additional insight is available yet. Trend events need a recent 30-minute window; recurring patterns and daily comparisons need readings across multiple dates.';
+    list.append(empty);
+    return;
+  }
+  for (const item of entries) {
+    const card = document.createElement('article');
+    card.className = 'analytics-card';
+    const top = document.createElement('div');
+    top.className = 'analytics-card-top';
+    const title = document.createElement('h2');
+    title.textContent = item.title || 'Glucose insight';
+    const category = document.createElement('span');
+    category.className = 'analytics-category';
+    category.textContent = String(item.category || 'insight').replaceAll('_', ' ');
+    top.append(title, category);
+    const message = document.createElement('p');
+    message.textContent = item.message || '';
+    card.append(top, message);
+    if (Number.isFinite(item.sample_count)) {
+      const sampleMeta = document.createElement('small');
+      sampleMeta.className = 'analytics-meta';
+      sampleMeta.textContent = `Based on ${item.sample_count} available readings`;
+      card.append(sampleMeta);
+    }
+    list.append(card);
+  }
+}
+
+document.querySelector('#detailsBtn').addEventListener('click', () => showScreen('insightsScreen'));
 function showScreen(id) {
   document.querySelectorAll('main').forEach(screen => { screen.hidden = screen.id !== id; });
   document.querySelectorAll('.tabbar a').forEach(link => link.classList.toggle('active', link.dataset.screen === id));
@@ -201,6 +292,8 @@ fetch('./api/summary', { cache: 'no-store' })
   .then(data => {
     if (data.disclaimer) document.querySelector('#disclaimerText').textContent = data.disclaimer;
     renderGlucoseHistory(data.glucose_history, data.chart_end_t);
+    renderPatternList(data.patterns);
+    renderInsightList(data.insights);
     const isDexcom = typeof data.mode === 'string' && data.mode.startsWith('dexcom_');
     if (isDexcom) {
       const label = data.source_label || 'Dexcom';
@@ -279,4 +372,6 @@ fetch('./api/summary', { cache: 'no-store' })
       });
     }
     renderGlucoseHistory([], null);
+    renderPatternList([]);
+    renderInsightList([]);
   });

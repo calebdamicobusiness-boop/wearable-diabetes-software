@@ -3,7 +3,7 @@ from __future__ import annotations
 
 import math
 import warnings
-from datetime import datetime
+from datetime import timezone
 from typing import Iterator
 
 from wearables import config
@@ -27,11 +27,15 @@ class DexcomSource:
         self.backend = backend
         self.history_days = history_days
         self.use_data_range = use_data_range
+        # Kept alongside, not inside, wearables.models.Sample so the public Sample
+        # shape remains unchanged while dashboard views retain Dexcom timestamps.
+        self.reading_metadata: list[dict] = []
 
     def samples(self) -> Iterator[Sample]:
         records = self.backend.glucose_records(days=self.history_days,
                                                use_data_range=self.use_data_range)
         normalized = []
+        metadata = []
         unverified_identity = False
         for record in records:
             if not isinstance(record, dict):
@@ -55,7 +59,16 @@ class DexcomSource:
                     value *= MGDL_PER_MMOLL
                 elif unit not in (None, "mg/dL"):
                     continue
-                normalized.append(Sample(timestamp, config.GLUCOSE, float(value)))
+                sample = Sample(timestamp, config.GLUCOSE, float(value))
+                normalized.append((sample, {
+                    "timestamp_original": record.get("systemTime"),
+                    "timestamp_epoch": timestamp.replace(tzinfo=timezone.utc).timestamp(),
+                    "mgdl": float(value),
+                    "unit_original": unit,
+                    "status": record.get("status"),
+                    "trend": record.get("trend"),
+                    "trend_rate": record.get("trendRate"),
+                }))
             except DexcomError:
                 continue
         if unverified_identity:
@@ -63,7 +76,9 @@ class DexcomSource:
                 f"Dexcom response did not provide recognizable device metadata; "
                 f"{self.device_model} was selected explicitly but could not be verified.",
                 RuntimeWarning, stacklevel=2)
-        yield from sorted(normalized, key=lambda sample: sample.timestamp)
+        normalized.sort(key=lambda pair: pair[0].timestamp)
+        self.reading_metadata = [item for _, item in normalized]
+        yield from (sample for sample, _ in normalized)
 
     @classmethod
     def _record_models(cls, record: dict) -> set[str]:
