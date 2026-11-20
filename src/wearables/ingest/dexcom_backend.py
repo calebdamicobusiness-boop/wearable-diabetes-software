@@ -234,8 +234,11 @@ class DexcomBackend:
     def glucose_records(self, *, days: int = 1, use_data_range: bool = False) -> list[dict]:
         end = datetime.now(timezone.utc)
         if use_data_range:
+            #data_range = self.get_json("/v3/users/self/dataRange")
+            #raw_end = ((data_range.get("egvs") or {}).get("end") or {}).get("systemTime")
             data_range = self.get_json("/v3/users/self/dataRange")
             raw_end = ((data_range.get("egvs") or {}).get("end") or {}).get("systemTime")
+            #end = _parse_time(raw_end)
             if not raw_end:
                 raise DexcomError("dataRange has no glucose records")
             end = _parse_time(raw_end)
@@ -247,6 +250,19 @@ class DexcomBackend:
         records = data.get("records", data.get("egvs"))
         if not isinstance(records, list):
             raise DexcomError("malformed response (no records list)")
+        timestamps = []
+        for record in records:
+            if isinstance(record, dict) and record.get("systemTime"):
+                try:
+                    timestamps.append(_parse_time(record["systemTime"]))
+                except DexcomError:
+                    continue
+
+        newest = max(timestamps).isoformat() if timestamps else "none"
+
+        print(f"[DEXCOM DEBUG] dataRange end: {raw_end}")
+        print(f"[DEXCOM DEBUG] records returned: {len(records)}")
+        print(f"[DEXCOM DEBUG] newest record: {newest}")
         return records
 
 

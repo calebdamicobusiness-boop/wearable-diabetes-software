@@ -226,6 +226,42 @@ function renderPatternList(patterns) {
   }
 }
 
+function createAnalyticsCard(item) {
+  const card = document.createElement('article');
+  card.className = 'analytics-card';
+  const top = document.createElement('div');
+  top.className = 'analytics-card-top';
+  const title = document.createElement('h2');
+  title.textContent = item.title || 'Glucose insight';
+  const category = document.createElement('span');
+  category.className = 'analytics-category';
+  category.textContent = String(item.category || 'insight').replaceAll('_', ' ');
+  top.append(title, category);
+  const message = document.createElement('p');
+  message.textContent = item.message || '';
+  card.append(top, message);
+  if (Number.isFinite(item.sample_count)) {
+    const sampleMeta = document.createElement('small');
+    sampleMeta.className = 'analytics-meta';
+    sampleMeta.textContent = `Based on ${item.sample_count} available readings`;
+    card.append(sampleMeta);
+  }
+  return card;
+}
+
+function appendInsightGroup(list, label, entries) {
+  if (!entries.length) return;
+  const group = document.createElement('details');
+  group.className = 'insight-group';
+  const summary = document.createElement('summary');
+  summary.textContent = `${label} (${entries.length})`;
+  const content = document.createElement('div');
+  content.className = 'insight-group-content';
+  entries.forEach(item => content.append(createAnalyticsCard(item)));
+  group.append(summary, content);
+  list.append(group);
+}
+
 function renderInsightList(insights) {
   const list = document.querySelector('#insightList');
   list.replaceChildren();
@@ -237,28 +273,22 @@ function renderInsightList(insights) {
     list.append(empty);
     return;
   }
-  for (const item of entries) {
-    const card = document.createElement('article');
-    card.className = 'analytics-card';
-    const top = document.createElement('div');
-    top.className = 'analytics-card-top';
-    const title = document.createElement('h2');
-    title.textContent = item.title || 'Glucose insight';
-    const category = document.createElement('span');
-    category.className = 'analytics-category';
-    category.textContent = String(item.category || 'insight').replaceAll('_', ' ');
-    top.append(title, category);
-    const message = document.createElement('p');
-    message.textContent = item.message || '';
-    card.append(top, message);
-    if (Number.isFinite(item.sample_count)) {
-      const sampleMeta = document.createElement('small');
-      sampleMeta.className = 'analytics-meta';
-      sampleMeta.textContent = `Based on ${item.sample_count} available readings`;
-      card.append(sampleMeta);
-    }
-    list.append(card);
-  }
+
+  const featuredCategories = ['trend', 'time_in_range', 'daily_comparison', 'variability'];
+  const featured = featuredCategories
+    .map(category => entries.find(item => String(item.category || '').toLowerCase() === category))
+    .filter(Boolean);
+  const featuredSet = new Set(featured);
+  featured.forEach(item => list.append(createAnalyticsCard(item)));
+
+  const remaining = entries.filter(item => !featuredSet.has(item));
+  const changeEvents = remaining.filter(item =>
+    String(item.category || '').toLowerCase() === 'event' || /significant glucose change/i.test(item.title || '')
+  );
+  const eventSet = new Set(changeEvents);
+  const otherInsights = remaining.filter(item => !eventSet.has(item));
+  appendInsightGroup(list, 'More summaries', otherInsights);
+  appendInsightGroup(list, 'Glucose changes', changeEvents);
 }
 
 document.querySelector('#detailsBtn').addEventListener('click', () => showScreen('insightsScreen'));
@@ -313,18 +343,21 @@ fetch('./api/summary', { cache: 'no-store' })
           ? 'No glucose readings are available from this Dexcom account.'
           : 'No analytics insight was generated for the available glucose window.');
       ['#homeInsightCopy', '#patternInsightCopy'].forEach(selector => {
-        document.querySelector(selector).textContent = insightText;
+        const node = document.querySelector(selector);
+        if (node) node.textContent = insightText;
       });
       const insightLabel = insights.length ? `${insights.length} pipeline insight${insights.length === 1 ? '' : 's'}` : 'No insight';
       ['#homeInsightStatus', '#patternInsightStatus'].forEach(selector => {
-        document.querySelector(selector).textContent = insightLabel;
+        const node = document.querySelector(selector);
+        if (node) node.textContent = insightLabel;
       });
       const latestInsight = insights.at(-1);
       const insightTime = latestInsight
         ? new Date(latestInsight.timestamp * 1000).toLocaleString([], { dateStyle: 'medium', timeStyle: 'short' })
         : 'Shared glucose analytics';
       ['#homeInsightTime', '#patternInsightTime'].forEach(selector => {
-        document.querySelector(selector).textContent = insightTime;
+        const node = document.querySelector(selector);
+        if (node) node.textContent = insightTime;
       });
     } else {
       document.querySelector('.live').textContent = 'Simulated · Python pipeline';
