@@ -254,6 +254,20 @@ class SampleBuffer:
         )
         return [Sample(t, v, q, source) for t, v, q in rows]
 
+    def query_aggregated(self, source: str, t0: float, t1: float,
+                         bucket_s: int = BIN_S) -> list[Sample]:
+        """Return quality-filtered bucket means for efficient dashboard charts."""
+        if bucket_s <= 0:
+            raise ValueError("bucket_s must be positive")
+        rows = self.db.execute(
+            "SELECT CAST((t - ?) / ? AS INTEGER), AVG(value), AVG(quality) "
+            "FROM samples WHERE source=? AND t>=? AND t<? AND quality>=? "
+            "GROUP BY 1 ORDER BY 1",
+            (t0, bucket_s, source, t0, t1, MIN_SAMPLE_QUALITY),
+        )
+        return [Sample(t0 + idx * bucket_s, value, quality, source)
+                for idx, value, quality in rows]
+
     def latest(self, source: str) -> Optional[Sample]:
         """Newest usable sample (quality >= MIN_SAMPLE_QUALITY) for a source, or None."""
         row = self.db.execute(

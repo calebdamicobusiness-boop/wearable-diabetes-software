@@ -3,7 +3,7 @@
 <head>
   <meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
   <meta name="theme-color" content="#101b2b"><meta name="apple-mobile-web-app-capable" content="yes"><meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
-  <meta name="description" content="Wearables glucose and activity awareness dashboard"><link rel="manifest" href="manifest.webmanifest"><link rel="apple-touch-icon" href="icon.svg"><link rel="stylesheet" href="styles.css?v=6"><title>Wearables · Daily overview</title>
+  <meta name="description" content="Wearables glucose and activity awareness dashboard"><link rel="manifest" href="manifest.webmanifest"><link rel="apple-touch-icon" href="icon.svg"><link rel="stylesheet" href="styles.css?v=7"><title>Wearables · Daily overview</title>
 </head>
 <body>
   <div class="app-shell">
@@ -17,9 +17,21 @@
     </main>
     <main class="app-screen" id="signalsScreen" hidden>
       <section class="screen-heading"><p class="eyebrow">YOUR WEARABLES</p><h1>Signals</h1><p>Recent readings from each signal source.</p></section>
-      <section class="signal-grid"><article class="signal-card"><div class="signal-icon heart">♡</div><p>Heart rate</p><strong id="signalsHr">76 <small>bpm</small></strong><span class="signal-note dexcom-unavailable-note">Recent average · sample data</span></article><article class="signal-card"><div class="signal-icon skin">◌</div><p>Skin response</p><strong id="signalsEda">3.2 <small>μS tonic</small></strong><span class="signal-note dexcom-unavailable-note">EDA sample</span></article><article class="signal-card"><div class="signal-icon activity">↗</div><p>Movement</p><strong id="signalsMovement">4,820 <small>steps</small></strong><span class="signal-note dexcom-unavailable-note">Sample data</span></article><article class="signal-card"><div class="signal-icon sleep">☾</div><p>Sleep</p><strong id="signalsSleep">7h 24m</strong><span class="signal-note dexcom-unavailable-note">Last night · sample data</span></article></section>
-      <section class="detail-card"><p class="eyebrow">GLUCOSE</p><h2><span id="signalsGlucose">112</span> <small id="signalsUnit">mg/dL</small></h2><p>Latest sample reading: <span id="signalsAge">4 min ago</span>.</p><div class="mini-chart" id="signalsMiniChart" aria-label="Illustrative glucose trend"><span></span><span></span><span></span><span></span><span></span><span></span><span></span><span></span><span></span><span></span><span></span><span></span></div></section>
-      <p class="screen-footnote" id="signalsFootnote">Signal values are illustrative sample data until real sensor connections are added.</p>
+      <section class="signal-grid signal-dashboard" aria-label="Select a signal to explore its history">
+        <button type="button" class="signal-card signal-launch" data-signal="heart_rate" aria-expanded="false"><span class="signal-icon heart">♡</span><span class="signal-name">Heart rate</span><strong id="signalsHr">76 <small>bpm</small></strong><span class="signal-note">Tap to view trend</span></button>
+        <button type="button" class="signal-card signal-launch" data-signal="skin_response" aria-expanded="false"><span class="signal-icon skin">◌</span><span class="signal-name">Skin response</span><strong id="signalsEda">3.2 <small>μS tonic</small></strong><span class="signal-note">Tap to view trend</span></button>
+        <button type="button" class="signal-card signal-launch" data-signal="movement" aria-expanded="false"><span class="signal-icon activity">↗</span><span class="signal-name">Movement</span><strong id="signalsMovement">4,820 <small>steps</small></strong><span class="signal-note">Tap to view activity</span></button>
+        <button type="button" class="signal-card signal-launch" data-signal="sleep" aria-expanded="false"><span class="signal-icon sleep">☾</span><span class="signal-name">Sleep</span><strong id="signalsSleep">7h 24m</strong><span class="signal-note">Tap to view sleep</span></button>
+        <button type="button" class="signal-card signal-launch glucose-signal" data-signal="glucose" aria-expanded="false"><span class="signal-icon glucose-icon">◉</span><span class="signal-name">Glucose</span><strong><span id="signalsGlucose">112</span> <small id="signalsUnit">mg/dL</small></strong><span class="signal-note" id="signalsAge">4 min ago</span></button>
+      </section>
+      <section class="detail-card signal-chart-panel" id="signalChartPanel" aria-live="polite" hidden>
+        <header class="signal-chart-header"><div><p class="eyebrow" id="signalChartKind">LINE CHART</p><h2 id="signalChartTitle">Glucose</h2></div><button type="button" id="closeSignalChart" aria-label="Close signal chart">×</button></header>
+        <div class="range-pills" role="group" aria-label="Chart time range"><button type="button" data-range="today" aria-pressed="true">Today</button><button type="button" data-range="week" aria-pressed="false">1 week</button><button type="button" data-range="month" aria-pressed="false">1 month</button></div>
+        <svg id="signalChartSvg" viewBox="0 0 340 150" role="img" aria-label="Signal history chart"><g id="signalChartPlot"></g></svg>
+        <div class="signal-chart-labels" id="signalChartLabels" aria-hidden="true"></div>
+        <p class="signal-chart-note" id="signalChartNote"></p>
+      </section>
+      <p class="screen-footnote" id="signalsFootnote">Select any signal to explore available readings. Time ranges show the history currently stored by this demo.</p>
     </main>
     <main class="app-screen patterns-screen" id="patternsScreen" hidden>
       <section class="screen-heading patterns-header"><p class="eyebrow">OBSERVATIONS</p><h1>Patterns</h1><p>Recent glucose changes, newest first.</p><p class="pattern-count" id="patternCount" aria-live="polite">Loading patterns…</p></section>
@@ -28,6 +40,13 @@
     </main>
     <main class="app-screen insights-screen" id="insightsScreen" hidden>
       <section class="screen-heading"><p class="eyebrow">ANALYTICS</p><h1>Insights</h1><p>Summaries appear when the available data supports them.</p></section>
+      <section class="detail-card meal-response-card" aria-labelledby="mealResponseTitle">
+        <p class="eyebrow">MEAL RESPONSE</p><h2 id="mealResponseTitle">Glucose after meals</h2>
+        <p class="meal-response-note" id="mealResponseSummary">Log a meal time to compare the pre-meal reading with the highest available glucose reading during the following two hours.</p>
+        <form id="mealLogForm" class="meal-log-form"><label>Meal type<select id="mealType"><option>Breakfast</option><option>Lunch</option><option>Dinner</option><option>Snack</option></select></label><label>Meal time<input id="mealTime" type="datetime-local" required></label><button type="submit">Log meal time</button></form>
+        <ul id="mealLogList" class="meal-log-list" aria-live="polite"></ul>
+        <p class="meal-safety-note">For awareness only. No insulin dose or treatment suggestion is calculated. Meal times stay in this browser.</p>
+      </section>
       <div class="insight-list" id="insightList" aria-live="polite"></div>
       <p class="screen-footnote">Insights are descriptive and awareness-only. Longer-term summaries require enough readings across multiple dates.</p>
     </main>
@@ -40,5 +59,5 @@
     </main>
     <aside class="persistent-disclaimer" role="note" aria-label="Health information disclaimer"><span aria-hidden="true">◈</span><p id="disclaimerText">For awareness, not medical advice. This app does not diagnose, recommend treatment, or advise on insulin dosing. Talk to a healthcare professional about your health.</p></aside>
     <nav class="tabbar" aria-label="Main navigation"><a class="active" href="#home" data-screen="home"><span>⌂</span>Today</a><a href="#signals" data-screen="signalsScreen"><span>◷</span>Signals</a><a href="#patterns" data-screen="patternsScreen"><span>✳</span>Patterns</a><a href="#insights" data-screen="insightsScreen"><span>✦</span>Insights</a><a href="#settings" data-screen="settingsScreen"><span>⚙</span>Settings</a></nav>
-  </div><div class="toast" id="toast" role="status" aria-live="polite"></div><script src="app.js?v=10"></script>
+  </div><div class="toast" id="toast" role="status" aria-live="polite"></div><script src="app.js?v=11"></script>
 </body></html>

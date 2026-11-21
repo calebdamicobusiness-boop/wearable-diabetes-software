@@ -38,3 +38,40 @@
 /* Prominent provenance label for the hosted simulated-data demo. */
 .demo-data-badge{display:inline-flex;align-items:center;vertical-align:middle;margin-left:8px;padding:4px 8px;border-radius:999px;background:#ffe5a6;color:#493000;font:800 9px/1 'DM Sans',sans-serif;letter-spacing:.75px;box-shadow:0 1px 0 #fff8d8}
 .demo-data-badge[hidden]{display:none}
+
+/* Expanded signal history and descriptive meal observations. */
+.trend-pill{min-width:96px;min-height:72px;padding:9px 12px;display:flex;flex-direction:column;align-items:center;justify-content:center;gap:1px;border-radius:17px;font-size:11px;font-weight:700}
+.trend-arrow{font-size:30px;line-height:1;font-weight:800;margin:0}
+#trendLabel{font-size:11px;line-height:1.2}
+.signal-launch{width:100%;text-align:left;color:inherit;font:inherit;cursor:pointer;transition:border-color .15s,box-shadow .15s,transform .15s}
+.signal-launch:hover,.signal-launch[aria-expanded="true"]{border-color:#8bcbbd;box-shadow:0 5px 18px #1723370d;transform:translateY(-1px)}
+.signal-launch:focus-visible,#closeSignalChart:focus-visible,.range-pills button:focus-visible,.meal-log-form button:focus-visible{outline:3px solid #438b7b;outline-offset:2px}
+.signal-launch .signal-name{display:block;font-size:10px;color:#788596;margin-bottom:4px}
+.signal-launch .signal-note{white-space:normal}
+.glucose-icon{color:#347767;background:#e8f6f2}
+.signal-chart-panel{margin-top:12px}
+.signal-chart-header{display:flex;justify-content:space-between;align-items:center}
+.signal-chart-header h2{font:700 16px Manrope,sans-serif;margin:0}
+.signal-chart-header .eyebrow{margin:0 0 4px}
+#closeSignalChart{border:0;border-radius:50%;width:30px;height:30px;background:#f0f3f5;color:#607080;font-size:22px;line-height:1;cursor:pointer}
+.range-pills{display:flex;gap:5px;margin:15px 0 7px;padding:3px;background:#f1f4f5;border-radius:999px}
+.range-pills button{flex:1;border:0;border-radius:999px;padding:8px 5px;background:transparent;color:#718092;font:600 10px 'DM Sans',sans-serif;cursor:pointer}
+.range-pills button[aria-pressed="true"]{background:#fff;color:#367a6a;box-shadow:0 1px 4px #17233718}
+#signalChartSvg{width:100%;height:160px;overflow:visible}
+#signalChartSvg[hidden]{display:none}
+.signal-chart-grid{fill:none;stroke:#e9edf0;stroke-width:1}
+.signal-line{fill:none;stroke:#4eaa96;stroke-width:3;stroke-linejoin:round;stroke-linecap:round;vector-effect:non-scaling-stroke}
+.signal-line.heart_rate{stroke:#c77889}.signal-line.skin_response{stroke:#8878bd}.signal-line.glucose{stroke:#4eaa96}
+.signal-bar{fill:#82cbbb}.signal-bar.sleep{fill:#7793b6}
+.signal-chart-labels{display:flex;justify-content:space-between;color:#8b96a3;font-size:9px;margin-top:-1px}
+.signal-chart-note{font-size:10px;line-height:1.5;color:#718092;margin:10px 0 0}
+.meal-response-card h2{font:700 16px Manrope,sans-serif;margin:0 0 8px}
+.meal-response-note{font-size:10px;line-height:1.55;color:#647386;margin:0 0 13px}
+.meal-log-form{display:grid;grid-template-columns:1fr 1.2fr;gap:9px;align-items:end}
+.meal-log-form label{display:grid;gap:5px;color:#708092;font-size:9px;font-weight:600}
+.meal-log-form select,.meal-log-form input{min-width:0;width:100%;border:1px solid #e0e6e9;border-radius:9px;background:#fff;padding:9px;color:#27374a;font:500 10px 'DM Sans',sans-serif}
+.meal-log-form button{grid-column:1/-1;border:0;border-radius:10px;padding:10px;background:#e8f6f2;color:#347767;font:700 10px 'DM Sans',sans-serif;cursor:pointer}
+.meal-log-list{display:grid;gap:7px;list-style:none;padding:0;margin:12px 0 0}
+.meal-log-list li{display:flex;justify-content:space-between;align-items:center;gap:8px;border-top:1px solid #eef1f3;padding-top:8px;color:#58687a;font-size:9px;line-height:1.5}
+.meal-remove{flex:none;border:0;background:transparent;color:#8c6870;font:600 9px 'DM Sans',sans-serif;cursor:pointer}
+.meal-safety-note{font-size:9px;line-height:1.5;color:#8b7864;margin:12px 0 0}

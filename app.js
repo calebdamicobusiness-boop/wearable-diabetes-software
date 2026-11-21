@@ -1,6 +1,18 @@
 const unitToggle = document.querySelector('#unitToggle');
 let mmol = false;
 window.latestGlucose = 112;
+let signalHistoryData = {};
+let currentSignal = null;
+let currentHistoryRange = 'today';
+const signalInfo = {
+  glucose: { title: 'Glucose', kind: 'line', unit: 'mg/dL' },
+  heart_rate: { title: 'Heart rate', kind: 'line', unit: 'bpm' },
+  skin_response: { title: 'Skin response', kind: 'line', unit: 'μS' },
+  movement: { title: 'Movement', kind: 'bar', unit: 'steps' },
+  sleep: { title: 'Sleep', kind: 'bar', unit: 'hours' }
+};
+const mealStorageKey = 'wearables-meal-times-v1';
+let mealLogs = loadMealLogs();
 
 document.querySelector('#today').textContent = new Intl.DateTimeFormat(undefined, {
   weekday: 'long', month: 'long', day: 'numeric'
@@ -36,6 +48,8 @@ function updateUnits() {
   document.querySelector('#rangeLegend').innerHTML = mmol
     ? 'Low &lt;3.9 mmol/L <span>·</span> High &gt;10.0 mmol/L'
     : 'Low &lt;70 mg/dL <span>·</span> High &gt;180 mg/dL';
+  if (currentSignal) renderSignalChart();
+  if (mealLogs.length) renderMealResponse();
 }
 
 function renderGlucoseHistory(history, chartEnd) {
@@ -291,6 +305,254 @@ function renderInsightList(insights) {
   appendInsightGroup(list, 'Glucose changes', changeEvents);
 }
 
+function loadMealLogs() {
+  try {
+    const saved = JSON.parse(localStorage.getItem(mealStorageKey) || '[]');
+    return Array.isArray(saved) ? saved.filter(item => item && Number.isFinite(item.t) && typeof item.type === 'string') : [];
+  } catch (_) {
+    return [];
+  }
+}
+
+function saveMealLogs() {
+  try {
+    localStorage.setItem(mealStorageKey, JSON.stringify(mealLogs.slice(-100)));
+  } catch (_) {
+    showToast('Meal times could not be saved in this browser.');
+  }
+}
+
+function formatGlucose(value) {
+  return `${mmol ? (value / 18.016).toFixed(1) : Math.round(value)} ${mmol ? 'mmol/L' : 'mg/dL'}`;
+}
+
+function mealObservations() {
+  const glucose = (signalHistoryData.glucose || []).filter(point => Number.isFinite(point.t) && Number.isFinite(point.value));
+  return mealLogs.map(meal => {
+    const baseline = glucose.filter(point => point.t <= meal.t && point.t >= meal.t - 30 * 60).at(-1);
+    const after = glucose.filter(point => point.t >= meal.t && point.t <= meal.t + 2 * 3600);
+    const complete = meal.t + 2 * 3600 <= Date.now() / 1000;
+    if (!baseline || !after.length || !complete) return { meal, pending: true };
+    const peak = after.reduce((best, point) => point.value > best.value ? point : best, after[0]);
+    return { meal, peak, rise: peak.value - baseline.value, minutesToPeak: (peak.t - meal.t) / 60 };
+  }).sort((a, b) => b.meal.t - a.meal.t);
+}
+
+function renderMealResponse() {
+  const summary = document.querySelector('#mealResponseSummary');
+  const list = document.querySelector('#mealLogList');
+  if (!summary || !list) return;
+  list.replaceChildren();
+  if (!mealLogs.length) {
+    summary.textContent = 'Log meal times to compare the pre-meal glucose reading with the highest reading in the following two hours.';
+    return;
+  }
+  const observations = mealObservations();
+  const complete = observations.filter(item => Number.isFinite(item.rise));
+  if (complete.length) {
+    const averageRise = complete.reduce((total, item) => total + item.rise, 0) / complete.length;
+    const averageMinutes = complete.reduce((total, item) => total + item.minutesToPeak, 0) / complete.length;
+    const sign = averageRise >= 0 ? '+' : '−';
+    const shownRise = mmol ? Math.abs(averageRise / 18.016).toFixed(1) : Math.round(Math.abs(averageRise));
+    summary.textContent = `Across ${complete.length} logged meal${complete.length === 1 ? '' : 's'}, the average rise was ${sign}${shownRise} ${mmol ? 'mmol/L' : 'mg/dL'}; readings peaked an average of ${Math.round(averageMinutes)} minutes after the meal.`;
+  } else {
+    summary.textContent = 'There is not enough glucose history around these meal times yet. A comparison needs a reading in the 30 minutes before the meal and readings during the following two hours.';
+  }
+  for (const item of observations) {
+    const row = document.createElement('li');
+    const mealDate = new Date(item.meal.t * 1000);
+    const mealTime = mealDate.toLocaleString([], { month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit' });
+    const description = document.createElement('span');
+    description.textContent = item.pending
+      ? `${item.meal.type} · ${mealTime} — waiting for enough glucose readings`
+      : `${item.meal.type} · ${mealTime} — ${item.rise >= 0 ? '+' : '−'}${formatGlucose(Math.abs(item.rise))} · peak ${new Date(item.peak.t * 1000).toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' })}`;
+    const remove = document.createElement('button');
+    remove.type = 'button';
+    remove.className = 'meal-remove';
+    remove.textContent = 'Remove';
+    remove.setAttribute('aria-label', `Remove ${item.meal.type} at ${mealTime}`);
+    remove.addEventListener('click', () => {
+      mealLogs = mealLogs.filter(meal => meal !== item.meal);
+      saveMealLogs();
+      renderMealResponse();
+    });
+    row.append(description, remove);
+    list.append(row);
+  }
+}
+
+function historyRangeStart(range) {
+  const now = new Date();
+  if (range === 'today') {
+    now.setHours(0, 0, 0, 0);
+    return now.getTime() / 1000;
+  }
+  return Date.now() / 1000 - (range === 'week' ? 7 : 30) * 86400;
+}
+
+function renderSignalChart() {
+  const panel = document.querySelector('#signalChartPanel');
+  if (!panel || !currentSignal) return;
+  const info = signalInfo[currentSignal];
+  const chart = document.querySelector('#signalChartSvg');
+  const plot = document.querySelector('#signalChartPlot');
+  const labels = document.querySelector('#signalChartLabels');
+  const note = document.querySelector('#signalChartNote');
+  document.querySelector('#signalChartTitle').textContent = info.title;
+  document.querySelector('#signalChartKind').textContent = info.kind === 'line' ? 'LINE CHART' : 'BAR CHART';
+  chart.setAttribute('aria-label', `${info.title} history, ${currentHistoryRange === 'today' ? 'today' : currentHistoryRange === 'week' ? 'one week' : 'one month'}`);
+  document.querySelectorAll('.range-pills button').forEach(button => button.setAttribute('aria-pressed', String(button.dataset.range === currentHistoryRange)));
+  plot.replaceChildren();
+  labels.replaceChildren();
+  const now = Date.now() / 1000;
+  let requestedStart = historyRangeStart(currentHistoryRange);
+  if (currentSignal === 'sleep' && currentHistoryRange === 'today') {
+    const lastNight = new Date();
+    lastNight.setHours(18, 0, 0, 0);
+    if (lastNight.getTime() / 1000 > now) lastNight.setDate(lastNight.getDate() - 1);
+    requestedStart = lastNight.getTime() / 1000;
+  }
+  const points = (signalHistoryData[currentSignal] || [])
+    .filter(point => Number.isFinite(point.t) && Number.isFinite(point.value) && point.t >= requestedStart && point.t <= now)
+    .sort((a, b) => a.t - b.t);
+  if (!points.length) {
+    chart.hidden = true;
+    note.textContent = `${info.title} history is not available for this time range.`;
+    return;
+  }
+  chart.hidden = false;
+  const first = points[0].t;
+  if (first > requestedStart + 3600) {
+    note.textContent = `Showing available readings since ${new Date(first * 1000).toLocaleDateString([], { month: 'short', day: 'numeric' })}. Older history is not stored in this demo.`;
+  } else {
+    note.textContent = `Showing ${points.length} available readings. These charts describe the data and are not treatment guidance.`;
+  }
+  const grid = document.createElementNS(svgNS, 'path');
+  grid.setAttribute('d', 'M10 20H330 M10 75H330 M10 130H330');
+  grid.setAttribute('class', 'signal-chart-grid');
+  plot.append(grid);
+  if (info.kind === 'line') {
+    const values = points.map(point => point.value);
+    let low = Math.min(...values), high = Math.max(...values);
+    if (low === high) { low -= 1; high += 1; }
+    const pad = (high - low) * 0.08;
+    low -= pad; high += pad;
+    const timeSpan = Math.max(1, now - requestedStart);
+    const coords = points.map(point => ({
+      x: 10 + Math.max(0, Math.min(1, (point.t - requestedStart) / timeSpan)) * 320,
+      y: 130 - (point.value - low) * 110 / (high - low)
+    }));
+    const line = document.createElementNS(svgNS, 'path');
+    line.setAttribute('d', coords.map((point, index) => `${index ? 'L' : 'M'}${point.x.toFixed(1)} ${point.y.toFixed(1)}`).join(' '));
+    line.setAttribute('class', `signal-line ${currentSignal}`);
+    plot.append(line);
+    const unitLabel = currentSignal === 'glucose' ? (mmol ? 'mmol/L' : 'mg/dL') : info.unit;
+    note.textContent = `${Math.round(low)}–${Math.round(high)} ${unitLabel} displayed · ${points.length} readings. ` + note.textContent;
+  } else {
+    const groups = new Map();
+    for (const point of points) {
+      const date = new Date(point.t * 1000);
+      const key = currentHistoryRange === 'today'
+        ? `${date.getFullYear()}-${date.getMonth()}-${date.getDate()}-${date.getHours()}`
+        : `${date.getFullYear()}-${date.getMonth()}-${date.getDate()}`;
+      if (!groups.has(key)) groups.set(key, { date, total: 0, count: 0 });
+      const group = groups.get(key);
+      group.total += currentSignal === 'sleep' ? point.value * 5 / 60 : point.value;
+      group.count += 1;
+    }
+    const buckets = [...groups.values()];
+    const values = buckets.map(item => item.total);
+    const max = Math.max(...values, 1);
+    const width = Math.max(3, 260 / buckets.length - 3);
+    buckets.forEach((bucket, index) => {
+      const rect = document.createElementNS(svgNS, 'rect');
+      const barHeight = 105 * bucket.total / max;
+      rect.setAttribute('x', (20 + index * 300 / buckets.length).toFixed(1));
+      rect.setAttribute('y', (130 - barHeight).toFixed(1));
+      rect.setAttribute('width', width.toFixed(1));
+      rect.setAttribute('height', Math.max(1, barHeight).toFixed(1));
+      rect.setAttribute('rx', '3');
+      rect.setAttribute('class', `signal-bar ${currentSignal}`);
+      const title = document.createElementNS(svgNS, 'title');
+      title.textContent = `${bucket.date.toLocaleDateString([], { month: 'short', day: 'numeric', hour: currentHistoryRange === 'today' ? 'numeric' : undefined })}: ${currentSignal === 'sleep' ? bucket.total.toFixed(1) : Math.round(bucket.total)} ${info.unit}`;
+      rect.append(title);
+      plot.append(rect);
+    });
+    note.textContent = `${currentSignal === 'sleep' ? 'Sleep hours' : 'Steps'} by ${currentHistoryRange === 'today' ? 'hour' : 'day'} from available readings. ` + note.textContent;
+  }
+  const firstLabel = document.createElement('span');
+  const labelOptions = currentHistoryRange === 'today'
+    ? { hour: 'numeric', minute: '2-digit' }
+    : { month: 'short', day: 'numeric' };
+  firstLabel.textContent = new Date(points[0].t * 1000).toLocaleString([], labelOptions);
+  const lastLabel = document.createElement('span');
+  lastLabel.textContent = new Date(points.at(-1).t * 1000).toLocaleString([], labelOptions);
+  labels.append(firstLabel, lastLabel);
+}
+
+function updateSimulatedActivityValues() {
+  const movement = (signalHistoryData.movement || []).filter(point => Number.isFinite(point.t) && Number.isFinite(point.value));
+  const today = new Date();
+  today.setHours(0, 0, 0, 0);
+  const todaySteps = movement.filter(point => point.t >= today.getTime() / 1000)
+    .reduce((total, point) => total + point.value, 0);
+  if (todaySteps > 0) {
+    ['#homeMovement', '#signalsMovement'].forEach(selector => {
+      document.querySelector(selector).innerHTML = `${Math.round(todaySteps).toLocaleString()} <small>steps</small>`;
+    });
+  }
+  const sleep = (signalHistoryData.sleep || []).filter(point => Number.isFinite(point.t) && Number.isFinite(point.value));
+  const sleepStart = new Date();
+  sleepStart.setHours(18, 0, 0, 0);
+  if (sleepStart.getTime() > Date.now()) sleepStart.setDate(sleepStart.getDate() - 1);
+  const sleepMinutes = sleep.filter(point => point.t >= sleepStart.getTime() / 1000 && point.t <= Date.now() / 1000)
+    .reduce((total, point) => total + point.value * 5, 0);
+  if (sleepMinutes > 0) {
+    const hours = Math.floor(sleepMinutes / 60);
+    const minutes = Math.round(sleepMinutes % 60);
+    ['#homeSleep', '#signalsSleep'].forEach(selector => {
+      document.querySelector(selector).textContent = `${hours}h ${minutes}m`;
+    });
+  }
+}
+
+function setDefaultMealTime() {
+  const input = document.querySelector('#mealTime');
+  if (!input) return;
+  const now = new Date();
+  input.value = new Date(now.getTime() - now.getTimezoneOffset() * 60000).toISOString().slice(0, 16);
+  input.max = input.value;
+}
+
+document.querySelectorAll('.signal-launch').forEach(button => button.addEventListener('click', () => {
+  currentSignal = button.dataset.signal;
+  currentHistoryRange = 'today';
+  document.querySelectorAll('.signal-launch').forEach(item => item.setAttribute('aria-expanded', String(item === button)));
+  document.querySelector('#signalChartPanel').hidden = false;
+  renderSignalChart();
+  document.querySelector('#signalChartPanel').scrollIntoView({ behavior: 'smooth', block: 'nearest' });
+}));
+document.querySelectorAll('.range-pills button').forEach(button => button.addEventListener('click', () => {
+  currentHistoryRange = button.dataset.range;
+  renderSignalChart();
+}));
+document.querySelector('#closeSignalChart').addEventListener('click', () => {
+  document.querySelector('#signalChartPanel').hidden = true;
+  document.querySelectorAll('.signal-launch').forEach(button => button.setAttribute('aria-expanded', 'false'));
+  currentSignal = null;
+});
+document.querySelector('#mealLogForm').addEventListener('submit', event => {
+  event.preventDefault();
+  const t = new Date(document.querySelector('#mealTime').value).getTime() / 1000;
+  if (!Number.isFinite(t) || t > Date.now() / 1000) { showToast('Choose a meal time in the past.'); return; }
+  mealLogs.push({ type: document.querySelector('#mealType').value, t });
+  mealLogs = mealLogs.slice(-100);
+  saveMealLogs();
+  renderMealResponse();
+});
+setDefaultMealTime();
+renderMealResponse();
+
 document.querySelector('#detailsBtn').addEventListener('click', () => showScreen('insightsScreen'));
 function showScreen(id) {
   document.querySelectorAll('main').forEach(screen => { screen.hidden = screen.id !== id; });
@@ -320,6 +582,9 @@ fetch('./api/summary', { cache: 'no-store' })
     return data;
   })
   .then(data => {
+    signalHistoryData = data.signal_history || {};
+    renderMealResponse();
+    if (currentSignal) renderSignalChart();
     if (data.disclaimer) document.querySelector('#disclaimerText').textContent = data.disclaimer;
     document.querySelector('#demoDataBadge').hidden = typeof data.mode === 'string' && data.mode.startsWith('dexcom_');
     renderGlucoseHistory(data.glucose_history, data.chart_end_t);
@@ -334,7 +599,6 @@ fetch('./api/summary', { cache: 'no-store' })
         .forEach(selector => { const node = document.querySelector(selector); if (node) node.textContent = '—'; });
       document.querySelectorAll('.dexcom-unavailable-note').forEach(node => { node.textContent = 'Not connected'; });
       document.querySelector('#signalsFootnote').textContent = 'Dexcom connection supplies glucose only; other signals are not connected.';
-      document.querySelector('#signalsMiniChart').hidden = true;
       document.querySelector('#previewControls').hidden = true;
 
       const insights = Array.isArray(data.insights) ? data.insights : [];
@@ -361,6 +625,7 @@ fetch('./api/summary', { cache: 'no-store' })
         if (node) node.textContent = insightTime;
       });
     } else {
+      updateSimulatedActivityValues();
       document.querySelector('.live').textContent = 'Simulated · Python pipeline';
     }
     if (data.glucose_mgdl !== null && data.glucose_mgdl !== undefined) {
@@ -383,6 +648,9 @@ fetch('./api/summary', { cache: 'no-store' })
     }
   })
   .catch(error => {
+    signalHistoryData = {};
+    renderMealResponse();
+    if (currentSignal) renderSignalChart();
     window.latestGlucose = null;
     updateUnits();
     document.querySelector('.live').textContent = 'Data unavailable';
@@ -400,7 +668,6 @@ fetch('./api/summary', { cache: 'no-store' })
         .forEach(selector => { const node = document.querySelector(selector); if (node) node.textContent = '—'; });
       document.querySelectorAll('.dexcom-unavailable-note').forEach(node => { node.textContent = 'Not connected'; });
       document.querySelector('#signalsFootnote').textContent = 'Dexcom connection supplies glucose only; other signals are not connected.';
-      document.querySelector('#signalsMiniChart').hidden = true;
       document.querySelector('#previewControls').hidden = true;
       ['#homeInsightStatus', '#patternInsightStatus'].forEach(selector => {
         document.querySelector(selector).textContent = 'Data unavailable';

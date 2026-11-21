@@ -7,6 +7,7 @@ import base64
 import binascii
 import hashlib
 import hmac
+import random
 import os
 import sys
 import time
@@ -28,13 +29,14 @@ from wearables.analytics.dashboard import generate_dashboard_insights, generate_
 from wearables.models import Sample as WearableSample
 
 DB = ROOT / "wearables_demo.db"
-start = time.time() - 6 * 3600
-buffer = si.SampleBuffer(str(DB))
+start = time.time() - 30 * 86400
+eda_start = time.time() - 6 * 3600
+buffer = si.SampleBuffer(str(DB), retention_s=30 * 86400)
 pipeline = si.IntegrationPipeline(buffer)
 pipeline.register(si.SimulatedSource("cgm", 300, 112, 17, 2.5, start, seed=12))
 pipeline.register(si.SimulatedSource("hr", 30, 76, 9, 3.0, start, seed=24))
-pipeline.register(si.SimulatedEDASource("eda", start_t=start, seed=36))
-pipeline.poll()
+pipeline.register(si.SimulatedEDASource("eda", start_t=eda_start, seed=36))
+pipeline.register(si.SimulatedSource("eda_chart", 300, 4.0, 0.8, 0.12, start, seed=36))
 dexcom_source = None
 dexcom_mode = None
 AUTH_COOKIE_NAME = "wearables_auth"
@@ -73,6 +75,62 @@ class SampleSnapshot:
 
     def samples(self):
         return iter(self._samples)
+
+
+class SimulatedStepsSource:
+    """Clearly synthetic five-minute step totals for the dashboard demo."""
+    name = "steps"
+    clock_offset_s = 0.0
+
+    def __init__(self, start_t):
+        self._next_t = start_t
+        self._rng = random.Random(41)
+
+    def fetch(self):
+        now, out = time.time(), []
+        while self._next_t <= now:
+            t = self._next_t
+            hour = datetime.fromtimestamp(t, timezone.utc).hour
+            if 7 <= hour < 22:
+                baseline = 21 if hour < 10 or hour >= 17 else 16
+                steps = max(0, round(self._rng.gauss(baseline, 9)))
+                if 18 <= hour < 19:
+                    steps += 45
+            else:
+                steps = 0
+            out.append(si.Sample(t, steps, 1.0, self.name))
+            self._next_t += 300
+        return out
+
+
+class SimulatedSleepSource:
+    """Synthetic five-minute sleep markers used only in demo mode."""
+    name = "sleep"
+    clock_offset_s = 0.0
+
+    def __init__(self, start_t):
+        self._next_t = start_t
+
+    def fetch(self):
+        now, out = time.time(), []
+        while self._next_t <= now:
+            t = self._next_t
+            clock = datetime.fromtimestamp(t, timezone.utc)
+            minute_of_day = clock.hour * 60 + clock.minute
+            asleep = minute_of_day >= (23 * 60 + 36) or minute_of_day < 7 * 60
+            out.append(si.Sample(t, 1.0 if asleep else 0.0, 1.0, self.name))
+            self._next_t += 300
+        return out
+
+
+def _history_payload(source, t0, t1):
+    return [{"t": sample.t, "value": round(sample.value, 2)}
+            for sample in buffer.query_aggregated(source, t0, t1)]
+
+
+pipeline.register(SimulatedStepsSource(start))
+pipeline.register(SimulatedSleepSource(start))
+pipeline.poll()
 
 
 def _summary_analytics(samples, metadata):
@@ -162,6 +220,7 @@ class Handler(SimpleHTTPRequestHandler):
         if dexcom_source is not None:
             self.send_dexcom_summary()
             return
+        pipeline.poll()
         now = time.time()
         window = pipeline.latest({"glucose": "cgm", "hr": "hr", "eda": "eda"}, now)
         payload = {
@@ -173,6 +232,14 @@ class Handler(SimpleHTTPRequestHandler):
                 {"t": sample.t, "mgdl": sample.value, "quality": sample.quality}
                 for sample in buffer.query("cgm", now - 6 * 3600, now + 1)
             ],
+            "signal_history": {
+                "glucose": _history_payload("cgm", now - 30 * 86400, now + 1),
+                "heart_rate": _history_payload("hr", now - 30 * 86400, now + 1),
+                "skin_response": _history_payload("eda_chart", now - 30 * 86400, now + 1),
+                "movement": _history_payload("steps", now - 30 * 86400, now + 1),
+                "sleep": _history_payload("sleep", now - 30 * 86400, now + 1),
+            },
+            "history_retention_days": 30,
             "heart_rate_bpm": window.features.get("hr_mean"),
             "eda_tonic_us": window.features.get("eda_tonic_mean"),
             "skin_responses_per_minute": window.features.get("scr_per_min"),
@@ -234,6 +301,17 @@ class Handler(SimpleHTTPRequestHandler):
             "glucose_mgdl": latest_record["mgdl"] if latest_record else None,
             "glucose_age_seconds": max(0.0, now - latest_t) if latest else None,
             "glucose_history": history,
+            "signal_history": {
+                "glucose": [
+                    {"t": record["timestamp_epoch"], "value": record["mgdl"]}
+                    for record in records
+                ],
+                "heart_rate": [],
+                "skin_response": [],
+                "movement": [],
+                "sleep": [],
+            },
+            "history_retention_days": 7,
             "insights": insights,
             "patterns": patterns,
             "heart_rate_bpm": None,
