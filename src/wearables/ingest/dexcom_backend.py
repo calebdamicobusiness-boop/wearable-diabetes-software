@@ -258,11 +258,6 @@ class DexcomBackend:
                 except DexcomError:
                     continue
 
-        newest = max(timestamps).isoformat() if timestamps else "none"
-
-        print(f"[DEXCOM DEBUG] dataRange end: {raw_end}")
-        print(f"[DEXCOM DEBUG] records returned: {len(records)}")
-        print(f"[DEXCOM DEBUG] newest record: {newest}")
         return records
 
 

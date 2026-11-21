@@ -3,9 +3,13 @@ from __future__ import annotations
 
 import json
 import argparse
+import base64
+import binascii
+import hmac
+import os
 import sys
 import time
-from http.server import SimpleHTTPRequestHandler, ThreadingHTTPServer
+from http.server import HTTPServer, SimpleHTTPRequestHandler
 from pathlib import Path
 from datetime import datetime, timezone
 
@@ -33,6 +37,31 @@ dexcom_source = None
 dexcom_mode = None
 
 
+def load_environment():
+    """Load local .env settings when python-dotenv is installed."""
+    try:
+        from dotenv import load_dotenv
+        load_dotenv()
+    except ImportError:
+        pass
+
+
+def dashboard_credentials():
+    username = os.getenv("DASHBOARD_USERNAME", "")
+    password = os.getenv("DASHBOARD_PASSWORD", "")
+    if not username or not password or ":" in username:
+        return None
+    return username, password
+
+
+def configured_port():
+    return int(os.getenv("PORT", "8000"))
+
+
+def server_host(dexcom_enabled):
+    return "127.0.0.1" if dexcom_enabled else "0.0.0.0"
+
+
 class SampleSnapshot:
     """Adapt one fetched batch to the existing pipeline without making another API call."""
     def __init__(self, samples):
@@ -52,10 +81,41 @@ class Handler(SimpleHTTPRequestHandler):
         super().__init__(*args, directory=str(ROOT), **kwargs)
 
     def do_GET(self):
+        if not self.require_authentication():
+            return
         if self.path.split("?", 1)[0] == "/api/summary":
             self.send_summary()
             return
         super().do_GET()
+
+    def do_HEAD(self):
+        if self.require_authentication():
+            super().do_HEAD()
+
+    def require_authentication(self):
+        expected = dashboard_credentials()
+        if expected is None:
+            self.send_error(503, "Dashboard authentication is not configured")
+            return False
+        supplied = self.headers.get("Authorization", "")
+        try:
+            scheme, encoded = supplied.split(" ", 1)
+            if scheme.lower() != "basic":
+                raise ValueError("unsupported scheme")
+            decoded = base64.b64decode(encoded, validate=True).decode("utf-8")
+            username, password = decoded.split(":", 1)
+        except (ValueError, UnicodeDecodeError, binascii.Error):
+            username, password = "", ""
+        valid = (hmac.compare_digest(username.encode("utf-8"), expected[0].encode("utf-8"))
+                 and hmac.compare_digest(password.encode("utf-8"), expected[1].encode("utf-8")))
+        if valid:
+            return True
+        self.send_response(401)
+        self.send_header("WWW-Authenticate", 'Basic realm="Wearables dashboard", charset="UTF-8"')
+        self.send_header("Cache-Control", "no-store")
+        self.send_header("Content-Length", "0")
+        self.end_headers()
+        return False
 
     def send_summary(self):
         if dexcom_source is not None:
@@ -153,13 +213,19 @@ class Handler(SimpleHTTPRequestHandler):
 
 
 if __name__ == "__main__":
+    load_environment()
     parser = argparse.ArgumentParser(description="Run the Wearables mobile app demo server.")
-    parser.add_argument("port", nargs="?", type=int, default=8000,
-                        help="port to serve on (default: 8000)")
+    parser.add_argument("port", nargs="?", type=int,
+                        default=configured_port(),
+                        help="port to serve on (defaults to PORT or 8000)")
     parser.add_argument("--dexcom", choices=("g6", "g7"),
                         help="connect the dashboard to the selected Dexcom adapter instead of simulated glucose")
     args = parser.parse_args()
+    if dashboard_credentials() is None:
+        parser.error("set DASHBOARD_USERNAME and DASHBOARD_PASSWORD before starting the dashboard")
     if args.dexcom:
+        if os.getenv("RENDER"):
+            parser.error("Dexcom OAuth testing is local-only and cannot run on Render")
         backend = DexcomBackend.from_env()
         print(f"Opening Dexcom sandbox authorization for {args.dexcom.upper()}...")
         backend.login()
@@ -171,8 +237,10 @@ if __name__ == "__main__":
         print("This demo uses simulated samples; no real health-device data is connected.")
     else:
         print(f"Dashboard is using the explicit Dexcom {args.dexcom.upper()} adapter.")
-    # The dashboard API has no user authentication. Keep real health data bound to
-    # this computer; the simulated demo retains its existing LAN-accessible behavior.
-    host = "127.0.0.1" if dexcom_source is not None else "0.0.0.0"
+    # Dexcom's OAuth callback and data remain local-only for sandbox testing.
+    host = server_host(dexcom_source is not None)
     print(f"Binding dashboard to {host} for {'Dexcom data' if dexcom_source else 'simulated demo data'}.")
-    ThreadingHTTPServer((host, args.port), Handler).serve_forever()
+    # The SQLite connection in SampleBuffer is created during startup on this
+    # thread. Serve requests here too, rather than using worker threads that
+    # cannot safely use that connection.
+    HTTPServer((host, args.port), Handler).serve_forever()

@@ -4,7 +4,7 @@ An installable, responsive PWA dashboard for Android and iOS. The included Pytho
 
 ## Run locally
 
-Install Python 3.10+, run `python server.py` from this folder, and open `http://localhost:8000`. For phone installation, host this server on an HTTPS address reachable by the phone, then use **Add to Home Screen** on iOS Safari or **Install app** in Android Chrome. The service worker caches the interface for offline viewing. The Python server must stay running to refresh demo readings.
+Install Python 3.10+, copy `.env.example` to `.env`, and choose a private `DASHBOARD_USERNAME` and strong `DASHBOARD_PASSWORD`. Run `python server.py` from this folder and open `http://localhost:8000`; enter those credentials when prompted. For phone installation, host this server on an HTTPS address reachable by the phone, then use **Add to Home Screen** on iOS Safari or **Install app** in Android Chrome. The service worker caches the interface for offline viewing. The Python server must stay running to refresh demo readings.
 
 ## Current scope
 
@@ -18,8 +18,9 @@ Install Python 3.10+, run `python server.py` from this folder, and open `http://
 The modular pipeline in `src/wearables` can consume Dexcom through explicit device adapters. Choose the source class that matches the configured account/device. Where Dexcom response metadata clearly identifies a G6 or G7 transmitter, the adapter checks it and raises an error on a mismatch. If metadata is absent or unrecognized, it warns that the explicitly selected model could not be verified; it does not invent device identity.
 
 1. Install dependencies: `python -m pip install -r requirements.txt`.
-2. Create a local `.env` (already excluded by `.gitignore`) with `DEXCOM_CLIENT_ID`, `DEXCOM_CLIENT_SECRET`, `DEXCOM_REDIRECT_URI` (for example `http://localhost:8000/callback`) and `DEXCOM_BASE_URL` (the sandbox host, `https://sandbox-api.dexcom.com`). Register the same redirect URI in the Dexcom developer application. Keep this file private.
-3. From the repository root, run the interactive sandbox smoke test with `PYTHONPATH=src python dexcom_sandbox_test.py`. It opens OAuth login and prints a small sample of returned readings; it does not print credentials or tokens.
+2. Copy `.env.example` to `.env` (already excluded by `.gitignore`), set a private `DASHBOARD_USERNAME` and strong `DASHBOARD_PASSWORD`, and keep the file private. The dashboard and every API request require HTTP Basic Authentication; the browser prompts for these credentials.
+3. For Dexcom sandbox testing, also set `DEXCOM_CLIENT_ID`, `DEXCOM_CLIENT_SECRET`, `DEXCOM_REDIRECT_URI` (for example `http://localhost:8000/callback`) and `DEXCOM_BASE_URL` (`https://sandbox-api.dexcom.com`). Register the same redirect URI in the Dexcom developer application.
+4. From the repository root, run the interactive sandbox smoke test with `PYTHONPATH=src python dexcom_sandbox_test.py`. It opens OAuth login and prints a small sample of returned readings; it does not print credentials or tokens.
 
 To use the readings in existing processing and analytics, instantiate the shared backend and selected device source, then pass the source to the existing pipeline:
 
@@ -40,11 +41,11 @@ Dexcom status/trend and a quality score are not represented by the existing `wea
 
 The backend automatically refreshes near-expiry access tokens and retries a 401 at most once. It keeps the current refresh token and expiry in memory for the life of the backend instance; process restart requires a new OAuth login because token persistence is not configured. The legacy top-level `sensor_integration.py` and its SQLite integration remain unchanged.
 
-Run offline tests (mocked API responses; no credentials or network access): `PYTHONPATH=src python -m unittest discover -s tests -v`. Health data should remain local until the project's encryption and sharing requirements are implemented.
+Run offline tests (mocked API responses; no Dexcom credentials or network access): `PYTHONPATH=src python -m unittest discover -s tests -v`. Health data should remain local until the project's encryption and sharing requirements are implemented.
 
 ### Show Dexcom data in the dashboard
 
-From the repository root in PowerShell, with the required Dexcom sandbox values configured in `.env`, start the dashboard in the selected device mode:
+From the repository root in PowerShell, with the dashboard credentials and Dexcom sandbox values configured in `.env`, start the dashboard in the selected device mode:
 
 ```powershell
 $env:PYTHONPATH = "src"
@@ -53,6 +54,10 @@ $env:PYTHONPATH = "src"
 
 For G7, run `.\.venv\Scripts\python.exe server.py --dexcom g7` instead. The server opens the OAuth browser flow before it starts listening; select the corresponding **Sandbox User - G6** or **Sandbox User - G7** account. The configured `DEXCOM_REDIRECT_URI` must match the registered callback and the server port (default `8000`). Then open `http://localhost:8000`.
 
-In Dexcom mode, `/api/summary` reads through the selected device adapter, calls the shared `wearables.pipeline.run()` processing and analytics path, and returns normalized glucose history and generated insights to the PWA. Sandbox history is requested relative to Dexcom's `dataRange` endpoint, so older canned readings can still populate the chart. Connection or model-metadata errors are shown as unavailable; the dashboard does not silently substitute simulated glucose. Because the dashboard API has no user authentication, Dexcom mode binds to `127.0.0.1` and is available only on the computer running the server. Other signals are marked not connected.
+In Dexcom mode, `/api/summary` reads through the selected device adapter, calls the shared `wearables.pipeline.run()` processing and analytics path, and returns normalized glucose history and generated insights to the PWA. Sandbox history is requested relative to Dexcom's `dataRange` endpoint, so older canned readings can still populate the chart. Connection or model-metadata errors are shown as unavailable; the dashboard does not silently substitute simulated glucose. Dexcom OAuth testing remains local-only: the dashboard binds to `127.0.0.1`, and its OAuth callback accepts localhost redirect URIs only. Other signals are marked not connected.
 
-The default `python server.py` mode remains the existing simulated dashboard and retains its LAN binding. Dexcom tokens are held in process memory, so restart the OAuth flow after restarting the server.
+The dashboard and all API endpoints use HTTP Basic Authentication in both simulated and Dexcom modes. The server fails closed when `DASHBOARD_USERNAME` or `DASHBOARD_PASSWORD` is missing. Do not expose local Dexcom testing to a LAN; the local-only binding is deliberate. Dexcom tokens are held in process memory, so restart the OAuth flow after restarting the server.
+
+### Render configuration
+
+Create a Render **Web Service** connected to this repository and branch. Set the build command to `pip install -r requirements.txt` and the start command to `python server.py`. Add `DASHBOARD_USERNAME` and a long, unique `DASHBOARD_PASSWORD` under the service's Environment settings. Render supplies `PORT`; the server reads it automatically and binds the simulated hosted dashboard to `0.0.0.0`. Do not set `DEXCOM_*` values or start with `--dexcom` on Render: Dexcom's OAuth callback and testing are restricted to localhost. Render provides HTTPS for the hosted service; use the HTTPS URL, and enter the Basic Auth credentials when prompted. These service and environment settings are the remaining manual Render configuration.
