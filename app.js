@@ -321,7 +321,7 @@ fetch('./api/summary', { cache: 'no-store' })
   })
   .then(data => {
     if (data.disclaimer) document.querySelector('#disclaimerText').textContent = data.disclaimer;
-    document.querySelector('#demoDataBadge').hidden = data.mode !== 'simulated';
+    document.querySelector('#demoDataBadge').hidden = typeof data.mode === 'string' && data.mode.startsWith('dexcom_');
     renderGlucoseHistory(data.glucose_history, data.chart_end_t);
     renderPatternList(data.patterns);
     renderInsightList(data.insights);
@@ -393,6 +393,7 @@ fetch('./api/summary', { cache: 'no-store' })
       if (node) node.textContent = error.message || 'Dashboard data could not be loaded.';
     });
     if (typeof error.mode === 'string' && error.mode.startsWith('dexcom_')) {
+      document.querySelector('#demoDataBadge').hidden = true;
       document.querySelector('.live').textContent = `${error.sourceLabel || 'Dexcom'} unavailable`;
       document.querySelector('#trendLabel').textContent = 'Trend unavailable';
       ['#homeHr', '#homeMovement', '#homeEda', '#homeSleep', '#signalsHr', '#signalsMovement', '#signalsEda', '#signalsSleep']
