@@ -18,7 +18,7 @@ Install Python 3.10+, copy `.env.example` to `.env`, and choose a private `DASHB
 The modular pipeline in `src/wearables` can consume Dexcom through explicit device adapters. Choose the source class that matches the configured account/device. Where Dexcom response metadata clearly identifies a G6 or G7 transmitter, the adapter checks it and raises an error on a mismatch. If metadata is absent or unrecognized, it warns that the explicitly selected model could not be verified; it does not invent device identity.
 
 1. Install dependencies: `python -m pip install -r requirements.txt`.
-2. Copy `.env.example` to `.env` (already excluded by `.gitignore`), set a private `DASHBOARD_USERNAME` and strong `DASHBOARD_PASSWORD`, and keep the file private. The dashboard and every API request require HTTP Basic Authentication; the browser prompts for these credentials.
+2. Copy `.env.example` to `.env` (already excluded by `.gitignore`), set a private `DASHBOARD_USERNAME` and strong `DASHBOARD_PASSWORD`, and keep the file private. The first browser authentication sets an HTTP-only, signed cookie valid for 30 days, so you do not need to re-enter credentials on each visit. Changing the dashboard password invalidates existing cookies.
 3. For Dexcom sandbox testing, also set `DEXCOM_CLIENT_ID`, `DEXCOM_CLIENT_SECRET`, `DEXCOM_REDIRECT_URI` (for example `http://localhost:8000/callback`) and `DEXCOM_BASE_URL` (`https://sandbox-api.dexcom.com`). Register the same redirect URI in the Dexcom developer application.
 4. From the repository root, run the interactive sandbox smoke test with `PYTHONPATH=src python dexcom_sandbox_test.py`. It opens OAuth login and prints a small sample of returned readings; it does not print credentials or tokens.
 
@@ -56,7 +56,7 @@ For G7, run `.\.venv\Scripts\python.exe server.py --dexcom g7` instead. The serv
 
 In Dexcom mode, `/api/summary` reads through the selected device adapter, calls the shared `wearables.pipeline.run()` processing and analytics path, and returns normalized glucose history and generated insights to the PWA. Sandbox history is requested relative to Dexcom's `dataRange` endpoint, so older canned readings can still populate the chart. Connection or model-metadata errors are shown as unavailable; the dashboard does not silently substitute simulated glucose. Dexcom OAuth testing remains local-only: the dashboard binds to `127.0.0.1`, and its OAuth callback accepts localhost redirect URIs only. Other signals are marked not connected.
 
-The dashboard and all API endpoints use HTTP Basic Authentication in both simulated and Dexcom modes. The server fails closed when `DASHBOARD_USERNAME` or `DASHBOARD_PASSWORD` is missing. Do not expose local Dexcom testing to a LAN; the local-only binding is deliberate. Dexcom tokens are held in process memory, so restart the OAuth flow after restarting the server.
+The dashboard and all API endpoints require authentication in both simulated and Dexcom modes. A signed, HTTP-only cookie remembers a successful browser authentication for 30 days. The server fails closed when `DASHBOARD_USERNAME` or `DASHBOARD_PASSWORD` is missing. Do not expose local Dexcom testing to a LAN; the local-only binding is deliberate. Dexcom tokens are held in process memory, so restart the OAuth flow after restarting the server.
 
 ### Render configuration
 

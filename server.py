@@ -5,10 +5,12 @@ import json
 import argparse
 import base64
 import binascii
+import hashlib
 import hmac
 import os
 import sys
 import time
+from http.cookies import CookieError, SimpleCookie
 from http.server import HTTPServer, SimpleHTTPRequestHandler
 from pathlib import Path
 from datetime import datetime, timezone
@@ -35,6 +37,8 @@ pipeline.register(si.SimulatedEDASource("eda", start_t=start, seed=36))
 pipeline.poll()
 dexcom_source = None
 dexcom_mode = None
+AUTH_COOKIE_NAME = "wearables_auth"
+AUTH_COOKIE_TTL = 30 * 24 * 60 * 60
 
 
 def load_environment():
@@ -92,11 +96,47 @@ class Handler(SimpleHTTPRequestHandler):
         if self.require_authentication():
             super().do_HEAD()
 
+    def end_headers(self):
+        cookie = getattr(self, "_auth_cookie_header", None)
+        if cookie:
+            self.send_header("Set-Cookie", cookie)
+        super().end_headers()
+
+    @staticmethod
+    def _session_signature(username, expires, password):
+        message = f"{username}:{expires}".encode("utf-8")
+        return hmac.new(password.encode("utf-8"), message, hashlib.sha256).hexdigest()
+
+    def _has_valid_auth_cookie(self, username, password):
+        try:
+            cookies = SimpleCookie(self.headers.get("Cookie", ""))
+            token = cookies[AUTH_COOKIE_NAME].value
+            expires_text, signature = token.split(".", 1)
+            expires = int(expires_text)
+        except (CookieError, KeyError, ValueError):
+            return False
+        if expires <= int(time.time()):
+            return False
+        expected_signature = self._session_signature(username, expires, password)
+        return hmac.compare_digest(signature, expected_signature)
+
+    def _issue_auth_cookie(self, username, password):
+        expires = int(time.time()) + AUTH_COOKIE_TTL
+        signature = self._session_signature(username, expires, password)
+        value = f"{expires}.{signature}"
+        secure = "; Secure" if self.headers.get("X-Forwarded-Proto", "").lower() == "https" else ""
+        self._auth_cookie_header = (
+            f"{AUTH_COOKIE_NAME}={value}; Path=/; Max-Age={AUTH_COOKIE_TTL}; "
+            f"HttpOnly; SameSite=Strict{secure}"
+        )
+
     def require_authentication(self):
         expected = dashboard_credentials()
         if expected is None:
             self.send_error(503, "Dashboard authentication is not configured")
             return False
+        if self._has_valid_auth_cookie(*expected):
+            return True
         supplied = self.headers.get("Authorization", "")
         try:
             scheme, encoded = supplied.split(" ", 1)
@@ -109,6 +149,7 @@ class Handler(SimpleHTTPRequestHandler):
         valid = (hmac.compare_digest(username.encode("utf-8"), expected[0].encode("utf-8"))
                  and hmac.compare_digest(password.encode("utf-8"), expected[1].encode("utf-8")))
         if valid:
+            self._issue_auth_cookie(*expected)
             return True
         self.send_response(401)
         self.send_header("WWW-Authenticate", 'Basic realm="Wearables dashboard", charset="UTF-8"')

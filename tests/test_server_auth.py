@@ -19,11 +19,13 @@ class DashboardAuthenticationTests(unittest.TestCase):
     def tearDownClass(cls):
         cls.httpd.server_close()
 
-    def request(self, path, credentials=None, method="GET"):
+    def request(self, path, credentials=None, method="GET", cookie=None):
         headers = {}
         if credentials is not None:
             token = base64.b64encode(credentials.encode("utf-8")).decode("ascii")
             headers["Authorization"] = f"Basic {token}"
+        if cookie is not None:
+            headers["Cookie"] = cookie
         result = {}
 
         def send_request():
@@ -63,14 +65,24 @@ class DashboardAuthenticationTests(unittest.TestCase):
 
     @patch.dict(os.environ, {"DASHBOARD_USERNAME": "tester", "DASHBOARD_PASSWORD": "secret"})
     def test_valid_credentials_access_dashboard_and_api(self):
-        status, _, body = self.request("/", "tester:secret")
+        status, headers, body = self.request("/", "tester:secret")
         self.assertEqual(status, 200)
         self.assertIn(b"<!doctype html>", body.lower())
+        set_cookie = headers["Set-Cookie"]
+        self.assertIn("HttpOnly", set_cookie)
+        self.assertIn("SameSite=Strict", set_cookie)
+        self.assertIn("Max-Age=2592000", set_cookie)
+        cookie = set_cookie.split(";", 1)[0]
 
-        status, headers, body = self.request("/api/summary", "tester:secret")
+        status, headers, body = self.request("/api/summary", cookie=cookie)
         self.assertEqual(status, 200)
         self.assertEqual(headers["Content-Type"], "application/json; charset=utf-8")
         self.assertIn(b'"glucose_mgdl"', body)
+
+    @patch.dict(os.environ, {"DASHBOARD_USERNAME": "tester", "DASHBOARD_PASSWORD": "secret"})
+    def test_invalid_auth_cookie_is_rejected(self):
+        status, _, _ = self.request("/api/summary", cookie="wearables_auth=invalid")
+        self.assertEqual(status, 401)
 
     @patch.dict(os.environ, {"DASHBOARD_USERNAME": "tester", "DASHBOARD_PASSWORD": "secret"})
     def test_wrong_credentials_are_rejected(self):
