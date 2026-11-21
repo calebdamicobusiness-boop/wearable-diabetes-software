@@ -321,6 +321,7 @@ fetch('./api/summary', { cache: 'no-store' })
   })
   .then(data => {
     if (data.disclaimer) document.querySelector('#disclaimerText').textContent = data.disclaimer;
+    document.querySelector('#demoDataBadge').hidden = data.mode !== 'simulated';
     renderGlucoseHistory(data.glucose_history, data.chart_end_t);
     renderPatternList(data.patterns);
     renderInsightList(data.insights);
