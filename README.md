@@ -14,6 +14,7 @@ Install Python 3.10+, copy `.env.example` to `.env`, and choose a private `DASHB
 - Glucose display toggle between mg/dL and mmol/L.
 - Responsive phone layout, accessible control labels, and offline app shell.
 - Simulated sample data by default, clearly labeled in the dashboard. An opt-in local Dexcom G6/G7 mode is available for sandbox validation. The app does not calculate or recommend insulin doses.
+- Draft Bluetooth prototype ingestion contract for computed ISP1807-relayed heart rate, HRV, SpO₂, skin temperature, interval steps, and ECG samples. The server accepts authenticated phone-relay HTTPS batches; Bluetooth pairing and the phone relay are not implemented yet. See [WEARABLE_DATA_CONTRACT.md](WEARABLE_DATA_CONTRACT.md).
 
 ## Dexcom G6/G7 integration
 
@@ -59,6 +60,8 @@ For G7, run `.\.venv\Scripts\python.exe server.py --dexcom g7` instead. The serv
 In Dexcom mode, `/api/summary` reads through the selected device adapter, calls the shared `wearables.pipeline.run()` processing and analytics path, and returns normalized glucose history and generated insights to the PWA. Sandbox history is requested relative to Dexcom's `dataRange` endpoint, so older canned readings can still populate the chart. Connection or model-metadata errors are shown as unavailable; the dashboard does not silently substitute simulated glucose. Dexcom OAuth testing remains local-only: the dashboard binds to `127.0.0.1`, and its OAuth callback accepts localhost redirect URIs only. Other signals are marked not connected.
 
 The dashboard and all API endpoints require authentication in both simulated and Dexcom modes. A signed, HTTP-only cookie remembers a successful browser authentication for 30 days. The server fails closed when `DASHBOARD_USERNAME` or `DASHBOARD_PASSWORD` is missing. Do not expose local Dexcom testing to a LAN; the local-only binding is deliberate. Dexcom tokens are held in process memory, so restart the OAuth flow after restarting the server.
+
+The separate `POST /api/device/readings` prototype endpoint requires a `WEARABLE_INGEST_TOKEN` bearer token (at least 32 characters). This is intended for a future phone relay and is not the dashboard password. It accepts only the draft v1 fields in `WEARABLE_DATA_CONTRACT.md`; it does not accept glucose or raw optical sensor data. Bluetooth connection/firmware and the phone relay are still to be built once the hardware details are agreed. Render's filesystem is ephemeral by default; configure a persistent disk mounted for `wearables_demo.db` before relying on stored device history across restarts or deploys.
 
 ### Render configuration
 

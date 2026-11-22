@@ -583,6 +583,9 @@ fetch('./api/summary', { cache: 'no-store' })
   })
   .then(data => {
     signalHistoryData = data.signal_history || {};
+    Object.entries(data.device_signal_history || {}).forEach(([name, points]) => {
+      if (Array.isArray(points) && points.length) signalHistoryData[name] = points;
+    });
     renderMealResponse();
     if (currentSignal) renderSignalChart();
     if (data.disclaimer) document.querySelector('#disclaimerText').textContent = data.disclaimer;
@@ -628,6 +631,29 @@ fetch('./api/summary', { cache: 'no-store' })
       updateSimulatedActivityValues();
       document.querySelector('.live').textContent = 'Simulated · Python pipeline';
     }
+    const deviceLatest = data.device_latest || {};
+    const hasDeviceReadings = Boolean(data.device_active);
+    if (hasDeviceReadings) {
+      if (Number.isFinite(deviceLatest.heart_rate_bpm?.value) && Date.now() / 1000 - deviceLatest.heart_rate_bpm.t <= 15 * 60) {
+        ['#homeHr', '#signalsHr'].forEach(selector => {
+          document.querySelector(selector).innerHTML = `${Math.round(deviceLatest.heart_rate_bpm.value)} <small>bpm</small>`;
+        });
+        ['#homeHr', '#signalsHr'].forEach(selector => {
+          document.querySelector(selector).closest('.signal-card').querySelector('.signal-note').textContent = 'Bluetooth prototype';
+        });
+      }
+      if (Array.isArray(data.device_signal_history?.movement) && data.device_signal_history.movement.length) {
+        updateSimulatedActivityValues();
+        ['#homeMovement', '#signalsMovement'].forEach(selector => {
+          document.querySelector(selector).closest('.signal-card').querySelector('.signal-note').textContent = 'Bluetooth prototype';
+        });
+      }
+      document.querySelector('.live').textContent = isDexcom
+        ? 'Dexcom + Bluetooth prototype'
+        : 'Bluetooth prototype + glucose demo';
+      document.querySelector('#signalsFootnote').textContent =
+        'Bluetooth prototype readings are shown where available. Glucose remains from its separate source; signals without prototype readings still use demo data.';
+    }
     if (data.glucose_mgdl !== null && data.glucose_mgdl !== undefined) {
       window.latestGlucose = data.glucose_mgdl;
       updateUnits();
@@ -635,9 +661,9 @@ fetch('./api/summary', { cache: 'no-store' })
       document.querySelector('.card-foot b').textContent = `${age} min ago`;
       document.querySelector('#signalsAge').textContent = `${age} min ago`;
       if (!isDexcom) {
-        document.querySelector('#homeHr').innerHTML = `${Math.round(data.heart_rate_bpm)} <small>bpm</small>`;
+        if (!Number.isFinite(deviceLatest.heart_rate_bpm?.value)) document.querySelector('#homeHr').innerHTML = `${Math.round(data.heart_rate_bpm)} <small>bpm</small>`;
         document.querySelector('#homeEda').innerHTML = `${Number(data.eda_tonic_us).toFixed(1)} <small>μS tonic</small>`;
-        document.querySelector('#signalsHr').innerHTML = `${Math.round(data.heart_rate_bpm)} <small>bpm</small>`;
+        if (!Number.isFinite(deviceLatest.heart_rate_bpm?.value)) document.querySelector('#signalsHr').innerHTML = `${Math.round(data.heart_rate_bpm)} <small>bpm</small>`;
         document.querySelector('#signalsEda').innerHTML = `${Number(data.eda_tonic_us).toFixed(1)} <small>μS tonic</small>`;
       }
     } else if (isDexcom) {

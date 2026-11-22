@@ -7,7 +7,9 @@ import base64
 import binascii
 import hashlib
 import hmac
+import math
 import random
+import re
 import os
 import sys
 import time
@@ -41,6 +43,19 @@ dexcom_source = None
 dexcom_mode = None
 AUTH_COOKIE_NAME = "wearables_auth"
 AUTH_COOKIE_TTL = 30 * 24 * 60 * 60
+DEVICE_INGEST_MAX_BYTES = 1_000_000
+DEVICE_INGEST_MAX_READINGS = 1000
+DEVICE_SIGNAL_SPECS = {
+    # Signal values here are computed wearable outputs. Raw optical channels and
+    # high-rate raw ECG transport need a separately agreed streaming protocol.
+    "heart_rate_bpm": ("bpm", 20.0, 250.0, "heart_rate"),
+    "hrv_ms": ("ms", 0.0, 1000.0, "hrv"),
+    "spo2_percent": ("%", 0.0, 100.0, "spo2"),
+    "skin_temp_c": ("Cel", 10.0, 50.0, "skin_temperature"),
+    # Each steps reading is the count accumulated over the interval ending at t.
+    "steps": ("count", 0.0, 100_000.0, "movement"),
+    "ecg_mv": ("mV", -20.0, 20.0, "ecg"),
+}
 
 
 def load_environment():
@@ -150,6 +165,14 @@ class Handler(SimpleHTTPRequestHandler):
             return
         super().do_GET()
 
+    def do_POST(self):
+        if self.path.split("?", 1)[0] != "/api/device/readings":
+            self.send_json(404, {"error": "Not found"})
+            return
+        if not self.require_device_token():
+            return
+        self.receive_device_readings()
+
     def do_HEAD(self):
         if self.require_authentication():
             super().do_HEAD()
@@ -216,6 +239,107 @@ class Handler(SimpleHTTPRequestHandler):
         self.end_headers()
         return False
 
+    def require_device_token(self):
+        """Authenticate a phone relay without embedding dashboard credentials in firmware."""
+        expected = os.getenv("WEARABLE_INGEST_TOKEN", "")
+        if len(expected) < 32:
+            self.send_json(503, {"error": "Wearable ingestion is not configured"})
+            return False
+        supplied = self.headers.get("Authorization", "")
+        scheme, _, token = supplied.partition(" ")
+        if scheme.lower() != "bearer" or not hmac.compare_digest(token, expected):
+            self.send_json(401, {"error": "Invalid device token"})
+            return False
+        return True
+
+    @staticmethod
+    def _device_timestamp(value):
+        if not isinstance(value, str):
+            raise ValueError("Each reading needs an ISO-8601 timestamp with a timezone.")
+        try:
+            parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+        except ValueError as exc:
+            raise ValueError("Invalid reading timestamp; use ISO-8601 with a timezone.") from exc
+        if parsed.tzinfo is None:
+            raise ValueError("Reading timestamp must include a timezone (UTC recommended).")
+        stamp = parsed.astimezone(timezone.utc).timestamp()
+        now = time.time()
+        if stamp < now - buffer.retention_s or stamp > now + 300:
+            raise ValueError("Reading timestamp is outside the accepted 30-day window.")
+        return stamp
+
+    def receive_device_readings(self):
+        try:
+            length = int(self.headers.get("Content-Length", "0"))
+        except ValueError:
+            self.send_json(400, {"error": "Invalid Content-Length"})
+            return
+        if length <= 0 or length > DEVICE_INGEST_MAX_BYTES:
+            self.send_json(413, {"error": "Request body must be between 1 byte and 1 MB"})
+            return
+        if "application/json" not in self.headers.get("Content-Type", "").lower():
+            self.send_json(415, {"error": "Content-Type must be application/json"})
+            return
+        try:
+            payload = json.loads(self.rfile.read(length))
+            device_id = payload.get("device_id")
+            readings = payload.get("readings")
+            if isinstance(payload.get("schema_version"), bool) or payload.get("schema_version") != 1:
+                raise ValueError("schema_version must be 1")
+            if not isinstance(device_id, str) or not re.fullmatch(r"[A-Za-z0-9_-]{1,48}", device_id):
+                raise ValueError("device_id must be 1–48 letters, numbers, underscores, or hyphens")
+            if not isinstance(readings, list) or not readings or len(readings) > DEVICE_INGEST_MAX_READINGS:
+                raise ValueError(f"readings must contain 1–{DEVICE_INGEST_MAX_READINGS} entries")
+
+            accepted = []
+            for item in readings:
+                if not isinstance(item, dict):
+                    raise ValueError("Each reading must be an object")
+                signal = item.get("signal")
+                if not isinstance(signal, str) or signal not in DEVICE_SIGNAL_SPECS:
+                    raise ValueError(f"Unsupported signal: {signal!r}")
+                unit, minimum, maximum, _ = DEVICE_SIGNAL_SPECS[signal]
+                if item.get("unit") != unit:
+                    raise ValueError(f"{signal} unit must be {unit!r}")
+                value = item.get("value")
+                if isinstance(value, bool) or not isinstance(value, (int, float)):
+                    raise ValueError(f"{signal} value must be a finite number")
+                try:
+                    value = float(value)
+                except (OverflowError, ValueError) as exc:
+                    raise ValueError(f"{signal} value must be a finite number") from exc
+                if not math.isfinite(value):
+                    raise ValueError(f"{signal} value must be a finite number")
+                if not minimum <= value <= maximum:
+                    raise ValueError(f"{signal} value is outside the accepted format range")
+                if signal == "steps" and not float(value).is_integer():
+                    raise ValueError("steps must be a whole-number interval count")
+                quality = item.get("quality")
+                if quality is None:
+                    # The database requires a validity weight. Use the pipeline's
+                    # minimum queryable value to mean “quality not supplied,” not “good.”
+                    quality = si.MIN_SAMPLE_QUALITY
+                if isinstance(quality, bool) or not isinstance(quality, (int, float)):
+                    raise ValueError("quality, when supplied, must be a number from 0 to 1")
+                try:
+                    quality = float(quality)
+                except (OverflowError, ValueError) as exc:
+                    raise ValueError("quality, when supplied, must be a number from 0 to 1") from exc
+                if not math.isfinite(quality) or not 0 <= quality <= 1:
+                    raise ValueError("quality, when supplied, must be a number from 0 to 1")
+                stamp = self._device_timestamp(item.get("timestamp"))
+                source = f"bt_{device_id}_{signal}"
+                accepted.append(si.Sample(stamp, float(value), float(quality), source))
+        except (UnicodeDecodeError, json.JSONDecodeError):
+            self.send_json(400, {"error": "Request body must be valid UTF-8 JSON"})
+            return
+        except (AttributeError, ValueError) as exc:
+            self.send_json(400, {"error": str(exc)})
+            return
+
+        buffer.add(accepted)
+        self.send_json(202, {"accepted": len(accepted), "device_id": device_id})
+
     def send_summary(self):
         if dexcom_source is not None:
             self.send_dexcom_summary()
@@ -248,6 +372,7 @@ class Handler(SimpleHTTPRequestHandler):
             "description": si.describe(window),
             "disclaimer": si.DISCLAIMER,
         }
+        self.add_device_data(payload, now)
         simulated_samples = buffer.query("cgm", now - 7 * 24 * 3600, now + 1)
         wearable_samples = [
             WearableSample(datetime.fromtimestamp(sample.t, timezone.utc).replace(tzinfo=None),
@@ -319,7 +444,50 @@ class Handler(SimpleHTTPRequestHandler):
             "status": "ok" if latest else "no_data",
             "disclaimer": si.DISCLAIMER,
         }
+        self.add_device_data(payload, now)
         self.send_json(200, payload)
+
+    @staticmethod
+    def add_device_data(payload, now):
+        """Expose prototype data separately, overlaying only matching dashboard signals."""
+        sources = [row[0] for row in buffer.db.execute(
+            "SELECT DISTINCT source FROM samples WHERE source GLOB 'bt_*'")]
+        histories = {name: [] for _, _, _, name in DEVICE_SIGNAL_SPECS.values()}
+        latest = {}
+        for source in sources:
+            signal = next((name for name in DEVICE_SIGNAL_SPECS if source.endswith(f"_{name}")), None)
+            spec = DEVICE_SIGNAL_SPECS.get(signal) if signal else None
+            if not spec:
+                continue
+            _, _, _, history_name = spec
+            if signal == "steps":
+                t0 = now - 30 * 86400
+                rows = buffer.db.execute(
+                    "SELECT CAST((t - ?) / ? AS INTEGER), SUM(value) "
+                    "FROM samples WHERE source=? AND t>=? AND t<? AND quality>=? "
+                    "GROUP BY 1 ORDER BY 1",
+                    (t0, si.BIN_S, source, t0, now + 1, si.MIN_SAMPLE_QUALITY),
+                )
+                points = [{"t": t0 + idx * si.BIN_S, "value": round(value, 2)} for idx, value in rows]
+            else:
+                points = _history_payload(source, now - 30 * 86400, now + 1)
+            histories[history_name].extend(points)
+            current = buffer.latest(source)
+            if current and (signal not in latest or current.t > latest[signal]["t"]):
+                latest[signal] = {"t": current.t, "value": current.value}
+        for points in histories.values():
+            points.sort(key=lambda point: point["t"])
+        payload["device_signal_history"] = histories
+        payload["device_latest"] = latest
+        payload["device_source_label"] = "Bluetooth prototype"
+        payload["device_active"] = any(now - item["t"] <= 15 * 60 for item in latest.values())
+        # The glucose stream remains Dexcom/simulated until its owning team supplies it.
+        if histories["heart_rate"]:
+            payload.setdefault("signal_history", {})["heart_rate"] = histories["heart_rate"]
+            if "heart_rate_bpm" in latest and now - latest["heart_rate_bpm"]["t"] <= 15 * 60:
+                payload["heart_rate_bpm"] = latest["heart_rate_bpm"]["value"]
+        if histories["movement"]:
+            payload.setdefault("signal_history", {})["movement"] = histories["movement"]
 
     def send_json(self, status, payload):
         body = payload if isinstance(payload, bytes) else json.dumps(payload).encode("utf-8")
