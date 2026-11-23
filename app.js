@@ -52,6 +52,25 @@ function updateUnits() {
   if (mealLogs.length) renderMealResponse();
 }
 
+function renderSignal(value, unit, digits, ...selectors) {
+  const reading = Number.isFinite(value) ? `${value.toFixed(digits)} <small>${unit}</small>` : 'No data';
+  for (const selector of selectors) {
+    document.querySelector(selector).innerHTML = reading;
+  }
+}
+
+const summaryLabels = new Map([
+  ['ok', 'Good data'],
+  ['low_confidence', 'Low confidence'],
+  ['suppressed', 'Insight withheld']
+]);
+
+function renderHomeInsight(label, description, source) {
+  document.querySelector('#homeInsightStatus').textContent = label;
+  document.querySelector('#homeInsightCopy').textContent = description;
+  document.querySelector('#homeInsightTime').textContent = source;
+}
+
 function renderGlucoseHistory(history, chartEnd) {
   if (Array.isArray(history)) glucoseHistory = history;
   if (Number.isFinite(chartEnd)) glucoseChartEnd = chartEnd;
@@ -327,14 +346,28 @@ function formatGlucose(value) {
 }
 
 function mealObservations() {
-  const glucose = (signalHistoryData.glucose || []).filter(point => Number.isFinite(point.t) && Number.isFinite(point.value));
+  const binSeconds = 5 * 60;
+  const windowBins = 24;
+  const minCoveredBins = 22;
+  const now = Date.now() / 1000;
+  const glucose = (signalHistoryData.glucose || [])
+    .filter(point => point && Number.isFinite(point.t) && Number.isFinite(point.value)
+      && (point.quality == null || point.quality >= 0.5))
+    .sort((a, b) => a.t - b.t);
   return mealLogs.map(meal => {
-    const baseline = glucose.filter(point => point.t <= meal.t && point.t >= meal.t - 30 * 60).at(-1);
-    const after = glucose.filter(point => point.t >= meal.t && point.t <= meal.t + 2 * 3600);
-    const complete = meal.t + 2 * 3600 <= Date.now() / 1000;
-    if (!baseline || !after.length || !complete) return { meal, pending: true };
+    const end = meal.t + windowBins * binSeconds;
+    if (now < end) return { meal, message: 'Collecting readings' };
+    const baseline = glucose.filter(point => point.t < meal.t && point.t >= meal.t - 30 * 60).at(-1);
+    const after = glucose.filter(point => point.t >= meal.t && point.t < end);
+    const coveredBins = new Set(after.map(point => Math.floor((point.t - meal.t) / binSeconds))).size;
+    const coverage = `${coveredBins} of ${windowBins} intervals`;
+    if (!baseline) return { meal, message: `Insufficient data: no pre-meal reading · ${coverage}` };
+    if (coveredBins < minCoveredBins) return { meal, message: `Insufficient data · ${coverage}` };
     const peak = after.reduce((best, point) => point.value > best.value ? point : best, after[0]);
-    return { meal, peak, rise: peak.value - baseline.value, minutesToPeak: (peak.t - meal.t) / 60 };
+    const change = peak.value - baseline.value;
+    const sign = change >= 0 ? '+' : '−';
+    return { meal, rise: change, minutesToPeak: (peak.t - meal.t) / 60,
+      message: `Highest observed: ${formatGlucose(peak.value)} (${sign}${formatGlucose(Math.abs(change))}) · ${coverage}` };
   }).sort((a, b) => b.meal.t - a.meal.t);
 }
 
@@ -354,18 +387,16 @@ function renderMealResponse() {
     const averageMinutes = complete.reduce((total, item) => total + item.minutesToPeak, 0) / complete.length;
     const sign = averageRise >= 0 ? '+' : '−';
     const shownRise = mmol ? Math.abs(averageRise / 18.016).toFixed(1) : Math.round(Math.abs(averageRise));
-    summary.textContent = `Across ${complete.length} logged meal${complete.length === 1 ? '' : 's'}, the average rise was ${sign}${shownRise} ${mmol ? 'mmol/L' : 'mg/dL'}; readings peaked an average of ${Math.round(averageMinutes)} minutes after the meal.`;
+    summary.textContent = `Across ${complete.length} meal${complete.length === 1 ? '' : 's'} with enough data, the highest observed glucose averaged ${sign}${shownRise} ${mmol ? 'mmol/L' : 'mg/dL'} from baseline. It occurred an average of ${Math.round(averageMinutes)} minutes after the meal.`;
   } else {
-    summary.textContent = 'There is not enough glucose history around these meal times yet. A comparison needs a reading in the 30 minutes before the meal and readings during the following two hours.';
+    summary.textContent = 'A comparison needs a pre-meal reading and data in at least 22 of the next 24 five-minute intervals.';
   }
   for (const item of observations) {
     const row = document.createElement('li');
     const mealDate = new Date(item.meal.t * 1000);
     const mealTime = mealDate.toLocaleString([], { month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit' });
     const description = document.createElement('span');
-    description.textContent = item.pending
-      ? `${item.meal.type} · ${mealTime} — waiting for enough glucose readings`
-      : `${item.meal.type} · ${mealTime} — ${item.rise >= 0 ? '+' : '−'}${formatGlucose(Math.abs(item.rise))} · peak ${new Date(item.peak.t * 1000).toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' })}`;
+    description.textContent = `${item.meal.type} · ${mealTime} — ${item.message}`;
     const remove = document.createElement('button');
     remove.type = 'button';
     remove.className = 'meal-remove';
@@ -607,42 +638,35 @@ fetch('./api/summary', { cache: 'no-store' })
         : (data.glucose_mgdl == null
           ? 'No glucose readings are available from this Dexcom account.'
           : 'No analytics insight was generated for the available glucose window.');
-      ['#homeInsightCopy', '#patternInsightCopy'].forEach(selector => {
-        const node = document.querySelector(selector);
-        if (node) node.textContent = insightText;
-      });
       const insightLabel = insights.length ? `${insights.length} pipeline insight${insights.length === 1 ? '' : 's'}` : 'No insight';
-      ['#homeInsightStatus', '#patternInsightStatus'].forEach(selector => {
-        const node = document.querySelector(selector);
-        if (node) node.textContent = insightLabel;
-      });
       const latestInsight = insights.at(-1);
       const insightTime = latestInsight
         ? new Date(latestInsight.timestamp * 1000).toLocaleString([], { dateStyle: 'medium', timeStyle: 'short' })
         : 'Shared glucose analytics';
-      ['#homeInsightTime', '#patternInsightTime'].forEach(selector => {
-        const node = document.querySelector(selector);
-        if (node) node.textContent = insightTime;
-      });
+      renderHomeInsight(insightLabel, insightText, insightTime);
     } else {
       updateSimulatedActivityValues();
       document.querySelector('.live').textContent = 'Simulated · Python pipeline';
+      const label = summaryLabels.get(data.status);
+      const description = typeof data.description === 'string' ? data.description.trim() : '';
+      const disclaimer = typeof data.disclaimer === 'string' ? data.disclaimer.trim() : '';
+      const summary = disclaimer && description.endsWith(disclaimer)
+        ? description.slice(0, -disclaimer.length).trim()
+        : description;
+      renderHomeInsight(label || 'Data unavailable',
+        (label && summary) || 'No signal summary is available.', 'Simulated window');
+      renderSignal(data.heart_rate_bpm, 'bpm', 0, '#homeHr', '#signalsHr');
+      renderSignal(data.eda_tonic_us, 'μS tonic', 1, '#homeEda', '#signalsEda');
     }
-    if (data.glucose_mgdl !== null && data.glucose_mgdl !== undefined) {
-      window.latestGlucose = data.glucose_mgdl;
-      updateUnits();
-      const age = Math.max(0, Math.round(data.glucose_age_seconds / 60));
-      document.querySelector('.card-foot b').textContent = `${age} min ago`;
-      document.querySelector('#signalsAge').textContent = `${age} min ago`;
-      if (!isDexcom) {
-        document.querySelector('#homeHr').innerHTML = `${Math.round(data.heart_rate_bpm)} <small>bpm</small>`;
-        document.querySelector('#homeEda').innerHTML = `${Number(data.eda_tonic_us).toFixed(1)} <small>μS tonic</small>`;
-        document.querySelector('#signalsHr').innerHTML = `${Math.round(data.heart_rate_bpm)} <small>bpm</small>`;
-        document.querySelector('#signalsEda').innerHTML = `${Number(data.eda_tonic_us).toFixed(1)} <small>μS tonic</small>`;
-      }
-    } else if (isDexcom) {
-      window.latestGlucose = null;
-      updateUnits();
+    window.latestGlucose = data.glucose_mgdl;
+    updateUnits();
+    if (Number.isFinite(data.glucose_mgdl)) {
+      const age = Number.isFinite(data.glucose_age_seconds)
+        ? `${Math.max(0, Math.round(data.glucose_age_seconds / 60))} min ago`
+        : 'Time unavailable';
+      document.querySelector('.card-foot b').textContent = age;
+      document.querySelector('#signalsAge').textContent = age;
+    } else {
       document.querySelector('.card-foot b').textContent = 'No reading';
       document.querySelector('#signalsAge').textContent = 'No reading available';
     }
@@ -656,10 +680,7 @@ fetch('./api/summary', { cache: 'no-store' })
     document.querySelector('.live').textContent = 'Data unavailable';
     document.querySelector('.card-foot b').textContent = 'Unavailable';
     document.querySelector('#signalsAge').textContent = 'Unavailable';
-    ['#homeInsightCopy', '#patternInsightCopy'].forEach(selector => {
-      const node = document.querySelector(selector);
-      if (node) node.textContent = error.message || 'Dashboard data could not be loaded.';
-    });
+    renderHomeInsight('Data unavailable', error.message || 'Dashboard data could not be loaded.', '');
     if (typeof error.mode === 'string' && error.mode.startsWith('dexcom_')) {
       document.querySelector('#demoDataBadge').hidden = true;
       document.querySelector('.live').textContent = `${error.sourceLabel || 'Dexcom'} unavailable`;
@@ -669,9 +690,9 @@ fetch('./api/summary', { cache: 'no-store' })
       document.querySelectorAll('.dexcom-unavailable-note').forEach(node => { node.textContent = 'Not connected'; });
       document.querySelector('#signalsFootnote').textContent = 'Dexcom connection supplies glucose only; other signals are not connected.';
       document.querySelector('#previewControls').hidden = true;
-      ['#homeInsightStatus', '#patternInsightStatus'].forEach(selector => {
-        document.querySelector(selector).textContent = 'Data unavailable';
-      });
+    } else {
+      renderSignal(null, 'bpm', 0, '#homeHr', '#signalsHr');
+      renderSignal(null, 'μS tonic', 1, '#homeEda', '#signalsEda');
     }
     renderGlucoseHistory([], null);
     renderPatternList([]);
