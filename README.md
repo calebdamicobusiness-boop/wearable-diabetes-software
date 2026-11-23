@@ -10,7 +10,7 @@ Install Python 3.10+, copy `.env.example` to `.env`, and choose a private `DASHB
 
 - Daily glucose trend, heart rate, movement, EDA and sleep overview.
 - Expandable signal charts with today, one-week and one-month ranges. Simulated mode seeds up to 30 days of labeled sample history; Dexcom mode charts glucose only and provides at most seven days from its selected sandbox data range.
-- Descriptive post-meal glucose comparisons after meal times are logged. Meal timestamps stay in browser storage; the app compares the latest reading in the 30 minutes before a logged meal with the highest available reading in the following two hours.
+- Descriptive post-meal glucose comparisons after meal times are logged. Meal timestamps stay in browser storage; the app compares the latest reading in the 30 minutes before a logged meal with the highest observed reading over the next two hours. The demo requires data in at least 22 of the 24 five-minute intervals after the meal.
 - Glucose display toggle between mg/dL and mmol/L.
 - Responsive phone layout, accessible control labels, and offline app shell.
 - Simulated sample data by default, clearly labeled in the dashboard. An opt-in local Dexcom G6/G7 mode is available for sandbox validation. The app does not calculate or recommend insulin doses.
